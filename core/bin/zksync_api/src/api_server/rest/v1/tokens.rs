@@ -19,7 +19,7 @@ use zksync_storage::{ConnectionPool, QueryResult};
 use zksync_types::{Token, TokenLike};
 
 use crate::{
-    fee_ticker::{TickerRequest, TokenPriceRequestType},
+    fee_ticker::{PriceError, TickerRequest, TokenPriceRequestType},
     utils::token_db_cache::TokenDBCache,
 };
 
@@ -41,9 +41,9 @@ impl ApiTokensData {
         fee_ticker: mpsc::Sender<TickerRequest>,
     ) -> Self {
         Self {
-            pool,
-            tokens,
             fee_ticker,
+            tokens,
+            pool,
         }
     }
 
@@ -76,17 +76,11 @@ impl ApiTokensData {
             })
             .await?;
 
-        // Ugly hack to distinguish real error from missing token.
         match price_receiver.await? {
             Ok(price) => Ok(Some(price)),
-            Err(err) => {
-                // TODO: Improve ticker API to remove this terrible code snippet. (task number ????)
-                if err.to_string().contains("Token not found") {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
-            }
+            Err(PriceError::TokenNotFound(_)) => Ok(None),
+            Err(PriceError::DBError(err)) => Err(anyhow::format_err!(err)),
+            Err(PriceError::ApiError(err)) => Err(anyhow::format_err!(err)),
         }
     }
 }
@@ -150,9 +144,11 @@ pub fn api_scope(
 mod tests {
     use std::collections::HashMap;
 
-    use zksync_types::Address;
+    use zksync_types::{Address, TokenId};
 
     use super::{super::test_utils::TestServerConfig, *};
+
+    use zksync_api_client::rest::v1::ClientError;
 
     fn dummy_fee_ticker(prices: &[(TokenLike, BigDecimal)]) -> mpsc::Sender<TickerRequest> {
         let (sender, mut receiver) = mpsc::channel(10);
@@ -175,8 +171,10 @@ mod tests {
                         let msg = if let Some(price) = prices.get(&token) {
                             Ok(price.clone())
                         } else {
-                            // To provide compatibility with the `token_price_usd` hack.
-                            Err(anyhow::format_err!("Token not found: {:?}", token))
+                            Err(PriceError::token_not_found(format!(
+                                "Token not found: {:?}",
+                                token
+                            )))
                         };
 
                         response.send(msg).expect("Unable to send response");
@@ -199,8 +197,8 @@ mod tests {
         cfg.fill_database().await?;
 
         let prices = [
-            (TokenLike::Id(1), 10_u64.into()),
-            (TokenLike::Id(15), 10_500_u64.into()),
+            (TokenLike::Id(TokenId(1)), 10_u64.into()),
+            (TokenLike::Id(TokenId(15)), 10_500_u64.into()),
             ("ETH".into(), 0_u64.into()),
             (Address::default().into(), 1_u64.into()),
         ];
@@ -222,16 +220,19 @@ mod tests {
         }
         assert_eq!(
             client
-                .token_price(&TokenLike::Id(2), TokenPriceKind::Currency)
+                .token_price(&TokenLike::Id(TokenId(2)), TokenPriceKind::Currency)
                 .await?,
             None
         );
-        // TODO Check error (ZKS-125)
-        client
-            .token_price(&TokenLike::Id(2), TokenPriceKind::Token)
+        let error = client
+            .token_price(&TokenLike::Id(TokenId(2)), TokenPriceKind::Token)
             .await
             .unwrap_err();
-
+        assert!(
+            matches!(error, ClientError::BadRequest { .. }),
+            "Incorrect error type: got {:?} instead of BadRequest",
+            error
+        );
         // Tokens requests
         let expected_tokens = {
             let mut storage = cfg.pool.access_storage().await?;
@@ -251,7 +252,10 @@ mod tests {
 
         let expected_token = &expected_tokens[0];
         assert_eq!(
-            &client.token_by_id(&TokenLike::Id(0)).await?.unwrap(),
+            &client
+                .token_by_id(&TokenLike::Id(TokenId(0)))
+                .await?
+                .unwrap(),
             expected_token
         );
         assert_eq!(
@@ -277,43 +281,6 @@ mod tests {
             expected_token
         );
         assert_eq!(client.token_by_id(&TokenLike::parse("XM")).await?, None);
-
-        server.stop().await;
-        Ok(())
-    }
-
-    // Test special case for Golem: tGLM token name should be alias for the GNT.
-    // By the way, since `TokenDBCache` is shared between this API implementation
-    // and the old RPC code, there is no need to write a test for the old implementation.
-    //
-    // TODO: Remove this case after Golem update [ZKS-173]
-    #[actix_rt::test]
-    #[cfg_attr(
-        not(feature = "api_test"),
-        ignore = "Use `zk test rust-api` command to perform this test"
-    )]
-    async fn gnt_as_tglm_alias() -> anyhow::Result<()> {
-        let cfg = TestServerConfig::default();
-        cfg.fill_database().await?;
-
-        let fee_ticker = dummy_fee_ticker(&[]);
-        let (client, server) = cfg.start_server(move |cfg| {
-            api_scope(cfg.pool.clone(), TokenDBCache::new(), fee_ticker.clone())
-        });
-
-        // Get Golem token as GNT.
-        let golem_gnt = client
-            .token_by_id(&TokenLike::from("GNT"))
-            .await?
-            .expect("Golem token should be exist");
-        // Get Golem token as GMT.
-        let golem_tglm = client
-            .token_by_id(&TokenLike::from("tGLM"))
-            .await?
-            .expect("Golem token should be exist");
-        // Check that GNT is alias to GMT.
-        assert_eq!(golem_gnt, golem_tglm);
-        assert_eq!(golem_gnt.id, 16);
 
         server.stop().await;
         Ok(())

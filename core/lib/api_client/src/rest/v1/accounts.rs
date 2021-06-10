@@ -1,14 +1,18 @@
 //! Accounts API client implementation
 
 // Built-in uses
-use std::{collections::BTreeMap, fmt::Display, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Display,
+    str::FromStr,
+};
 
 // External uses
 use serde::{Deserialize, Serialize};
 
 // Workspace uses
 use zksync_types::{
-    tx::TxHash, AccountId, Address, BlockNumber, Nonce, PriorityOp, PubKeyHash, H256,
+    tx::TxHash, AccountId, Address, BlockNumber, Nonce, PriorityOp, PubKeyHash, TokenId, H256,
 };
 use zksync_utils::{remove_prefix, BigUintSerdeWrapper};
 
@@ -30,6 +34,31 @@ pub enum AccountQuery {
     Address(Address),
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NFT {
+    id: TokenId,
+    content_hash: H256,
+    creator_id: AccountId,
+    creator_address: Address,
+    serial_id: u32,
+    address: Address,
+    symbol: String,
+}
+
+impl From<zksync_types::NFT> for NFT {
+    fn from(val: zksync_types::NFT) -> Self {
+        Self {
+            id: val.id,
+            content_hash: val.content_hash,
+            creator_id: val.creator_id,
+            creator_address: val.creator_address,
+            serial_id: val.serial_id,
+            address: val.address,
+            symbol: val.symbol,
+        }
+    }
+}
 /// Account state at the time of the zkSync block commit or verification.
 /// This means that each account has various states.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
@@ -37,6 +66,8 @@ pub enum AccountQuery {
 pub struct AccountState {
     /// Account wallet balances.
     pub balances: BTreeMap<String, BigUintSerdeWrapper>,
+    pub nfts: HashMap<TokenId, NFT>,
+    pub minted_nfts: HashMap<TokenId, NFT>,
     /// zkSync account nonce.
     pub nonce: Nonce,
     /// Hash of the account's owner public key.
@@ -179,7 +210,7 @@ impl FromStr for AccountQuery {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Ok(id) = s.parse() {
-            return Ok(Self::Id(id));
+            return Ok(Self::Id(AccountId(id)));
         }
 
         let s = remove_prefix(s);
@@ -222,7 +253,7 @@ impl AccountReceiptsQuery {
             AccountReceipts::Latest => Self::from_parts(
                 TxLocation {
                     // TODO: use `zksync_storage::MAX_BLOCK_NUMBER` instead
-                    block: BlockNumber::MAX,
+                    block: BlockNumber(u32::MAX),
                     index: None,
                 },
                 SearchDirection::Older,
@@ -236,7 +267,7 @@ impl AccountReceiptsQuery {
             direction: Some(direction),
             block: Some(location.block),
             index: location.index,
-            limit,
+            limit: BlockNumber(limit),
         }
     }
 }

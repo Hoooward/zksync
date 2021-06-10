@@ -4,12 +4,13 @@ import { Deployer } from '../src.ts/deploy';
 import { formatUnits, parseUnits } from 'ethers/lib/utils';
 import * as fs from 'fs';
 import * as path from 'path';
+import { web3Provider } from './utils';
 
-const provider = new ethers.providers.JsonRpcProvider(process.env.ETH_CLIENT_WEB3_URL);
+const provider = web3Provider();
 const testConfigPath = path.join(process.env.ZKSYNC_HOME as string, `etc/test_config/constant`);
 const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, { encoding: 'utf-8' }));
 
-(async () => {
+async function main() {
     const parser = new ArgumentParser({
         version: '0.1.0',
         addHelp: true,
@@ -25,8 +26,7 @@ const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, {
     });
     parser.addArgument('--initArgs', {
         required: false,
-        help:
-            'Upgrade function parameters comma-separated, RLP serialized in hex (Governance,Verifier,ZkSync): 0xaa..aa,0xbb..bb,0xcc..c or zero by default.',
+        help: 'Upgrade function parameters comma-separated, RLP serialized in hex (Governance,Verifier,ZkSync): 0xaa..aa,0xbb..bb,0xcc..c or zero by default.',
         defaultValue: '0x,0x,0x'
     });
     parser.addArgument('--cancelPreviousUpgrade', {
@@ -132,4 +132,11 @@ const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, {
     await finishUpgradeTx.wait();
 
     console.info('Upgrade successful');
-})();
+}
+
+main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+        console.error('Error:', err.message || err);
+        process.exit(1);
+    });

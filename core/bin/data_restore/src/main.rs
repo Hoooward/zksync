@@ -6,6 +6,8 @@ use zksync_crypto::convert::FeConvert;
 use zksync_storage::ConnectionPool;
 use zksync_types::{Address, H256};
 
+use web3::Web3;
+use zksync_data_restore::contract::ZkSyncDeployedContract;
 use zksync_data_restore::{
     add_tokens_to_storage, data_restore_driver::DataRestoreDriver,
     database_storage_interactor::DatabaseStorageInteractor, END_ETH_BLOCKS_OFFSET, ETH_BLOCKS_STEP,
@@ -50,7 +52,8 @@ pub struct ContractsConfig {
     governance_addr: Address,
     genesis_tx_hash: H256,
     contract_addr: Address,
-    available_block_chunk_sizes: Vec<usize>,
+    init_contract_version: u32,
+    upgrade_eth_blocks: Vec<u64>,
 }
 
 impl ContractsConfig {
@@ -69,21 +72,22 @@ impl ContractsConfig {
             governance_addr: contracts_opts.governance_addr,
             genesis_tx_hash: contracts_opts.genesis_tx_hash,
             contract_addr: contracts_opts.contract_addr,
-            available_block_chunk_sizes: chain_opts.state_keeper.block_chunk_sizes,
+            init_contract_version: contracts_opts.init_contract_version,
+            upgrade_eth_blocks: contracts_opts.upgrade_eth_blocks,
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    log::info!("Restoring zkSync state from the contract");
-    env_logger::init();
+    vlog::info!("Restoring zkSync state from the contract");
+    let _sentry_guard = vlog::init();
     let connection_pool = ConnectionPool::new(Some(1));
     let config_opts = ETHClientConfig::from_env();
 
     let opt = Opt::from_args();
 
-    let web3_url = opt.web3_url.unwrap_or(config_opts.web3_url);
+    let web3_url = opt.web3_url.unwrap_or_else(|| config_opts.web3_url());
 
     let transport = Http::new(&web3_url).expect("failed to start web3 transport");
 
@@ -91,6 +95,8 @@ async fn main() {
         .config_path
         .map(|path| ContractsConfig::from_file(&path))
         .unwrap_or_else(ContractsConfig::from_env);
+
+    vlog::info!("Using the following config: {:#?}", config);
 
     let finite_mode = opt.finite;
     let final_hash = if finite_mode {
@@ -100,16 +106,18 @@ async fn main() {
         None
     };
     let storage = connection_pool.access_storage().await.unwrap();
-
+    let web3 = Web3::new(transport);
+    let contract = ZkSyncDeployedContract::version4(web3.eth(), config.contract_addr);
     let mut driver = DataRestoreDriver::new(
-        transport,
+        web3,
         config.governance_addr,
-        config.contract_addr,
+        config.upgrade_eth_blocks,
+        config.init_contract_version,
         ETH_BLOCKS_STEP,
         END_ETH_BLOCKS_OFFSET,
-        config.available_block_chunk_sizes.clone(),
         finite_mode,
         final_hash,
+        contract,
     );
 
     let mut interactor = DatabaseStorageInteractor::new(storage);

@@ -3,18 +3,19 @@ use std::time::Instant;
 // External imports
 use sqlx::Acquire;
 // Workspace imports
-use zksync_types::{Account, AccountId, AccountUpdates, Address};
+use zksync_types::{Account, AccountId, AccountUpdates, Address, TokenId};
 // Local imports
 use self::records::*;
 use crate::diff::StorageAccountDiff;
 use crate::{QueryResult, StorageProcessor};
 
 pub mod records;
-mod restore_account;
+pub mod restore_account;
 mod stored_state;
 
 pub(crate) use self::restore_account::restore_account;
 pub use self::stored_state::StoredAccountState;
+use crate::tokens::records::StorageNFT;
 
 /// Account schema contains interfaces to interact with the stored
 /// ZKSync accounts.
@@ -22,6 +23,53 @@ pub use self::stored_state::StoredAccountState;
 pub struct AccountSchema<'a, 'c>(pub &'a mut StorageProcessor<'c>);
 
 impl<'a, 'c> AccountSchema<'a, 'c> {
+    /// Stores account type in the databse
+    /// There are 2 types: Owned and CREATE2
+    pub async fn set_account_type(
+        &mut self,
+        account_id: AccountId,
+        account_type: EthAccountType,
+    ) -> QueryResult<()> {
+        let start = Instant::now();
+
+        sqlx::query!(
+            r#"
+            INSERT INTO eth_account_types VALUES ( $1, $2 )
+            ON CONFLICT (account_id) DO UPDATE SET account_type = $2
+            "#,
+            i64::from(*account_id),
+            account_type as EthAccountType
+        )
+        .execute(self.0.conn())
+        .await?;
+
+        metrics::histogram!("sql.chain.state.set_account_type", start.elapsed());
+        Ok(())
+    }
+
+    /// Fetches account type from the database
+    pub async fn account_type_by_id(
+        &mut self,
+        account_id: AccountId,
+    ) -> QueryResult<Option<EthAccountType>> {
+        let start = Instant::now();
+
+        let result = sqlx::query_as!(
+            StorageAccountType,
+            r#"
+            SELECT account_id, account_type as "account_type!: EthAccountType" 
+            FROM eth_account_types WHERE account_id = $1
+            "#,
+            i64::from(*account_id)
+        )
+        .fetch_optional(self.0.conn())
+        .await?;
+
+        let account_type = result.map(|record| record.account_type as EthAccountType);
+        metrics::histogram!("sql.chain.account.account_type_by_id", start.elapsed());
+        Ok(account_type)
+    }
+
     /// Obtains both committed and verified state for the account by its ID.
     pub async fn account_state_by_id(
         &mut self,
@@ -91,7 +139,7 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
                 SELECT * FROM account_balance_updates
                 WHERE account_id = $1 AND block_number > $2
             ",
-            i64::from(account_id),
+            i64::from(*account_id),
             last_block
         )
         .fetch_all(transaction.conn())
@@ -103,7 +151,7 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
                 SELECT * FROM account_creates
                 WHERE account_id = $1 AND block_number > $2
             ",
-            i64::from(account_id),
+            i64::from(*account_id),
             last_block
         )
         .fetch_all(transaction.conn())
@@ -115,7 +163,18 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
                 SELECT * FROM account_pubkey_updates
                 WHERE account_id = $1 AND block_number > $2
             ",
-            i64::from(account_id),
+            i64::from(*account_id),
+            last_block
+        )
+        .fetch_all(transaction.conn())
+        .await?;
+        let mint_nft_updates = sqlx::query_as!(
+            StorageMintNFTUpdate,
+            "
+                SELECT * FROM mint_nft_updates
+                WHERE creator_account_id = $1 AND block_number > $2
+            ",
+            *account_id as i32,
             last_block
         )
         .fetch_all(transaction.conn())
@@ -139,6 +198,7 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
                     .into_iter()
                     .map(StorageAccountDiff::from),
             );
+            account_diff.extend(mint_nft_updates.into_iter().map(StorageAccountDiff::from));
             account_diff.sort_by(StorageAccountDiff::cmp_order);
 
             account_diff
@@ -193,7 +253,7 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
                 SELECT * FROM accounts
                 WHERE id = $1
             ",
-            i64::from(account_id)
+            i64::from(*account_id)
         )
         .fetch_optional(&mut transaction)
         .await?;
@@ -205,13 +265,27 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
                     SELECT * FROM balances
                     WHERE account_id = $1
                 ",
-                i64::from(account_id)
+                i64::from(*account_id)
             )
             .fetch_all(&mut transaction)
             .await?;
 
             let last_block = account.last_block;
-            let (_, account) = restore_account(&account, balances);
+            let (_, mut account) = restore_account(&account, balances);
+            let nfts: Vec<StorageNFT> = sqlx::query_as!(
+                StorageNFT,
+                "
+                    SELECT * FROM nft 
+                    WHERE creator_account_id = $1
+                ",
+                *account_id as i32
+            )
+            .fetch_all(&mut transaction)
+            .await?;
+            account.minted_nfts.extend(
+                nfts.into_iter()
+                    .map(|nft| (TokenId(nft.token_id as u32), nft.into())),
+            );
             Ok((last_block, Some(account)))
         } else {
             Ok((0, None))
@@ -244,7 +318,7 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
         .fetch_optional(self.0.conn())
         .await?;
 
-        let account_id = result.map(|record| record.account_id as AccountId);
+        let account_id = result.map(|record| AccountId(record.account_id as u32));
         metrics::histogram!("sql.chain.account.account_id_by_address", start.elapsed());
         Ok(account_id)
     }
@@ -257,7 +331,7 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
         // Find the account address in `account_creates` table.
         let result = sqlx::query!(
             "SELECT address FROM account_creates WHERE account_id = $1",
-            i64::from(account_id)
+            i64::from(*account_id)
         )
         .fetch_optional(self.0.conn())
         .await?;
@@ -265,5 +339,29 @@ impl<'a, 'c> AccountSchema<'a, 'c> {
         let address = result.map(|record| Address::from_slice(&record.address));
         metrics::histogram!("sql.chain.account.account_address_by_id", start.elapsed());
         Ok(address)
+    }
+
+    // This method does not have metrics, since it is used only for the
+    // migration for the nft regenesis.
+    // Remove this function once the regenesis is complete and the tool is not
+    // needed anymore: ZKS-663
+    pub async fn get_all_accounts(&mut self) -> QueryResult<Vec<StorageAccount>> {
+        let result = sqlx::query_as!(StorageAccount, "SELECT * FROM accounts")
+            .fetch_all(self.0.conn())
+            .await?;
+
+        Ok(result)
+    }
+
+    // This method does not have metrics, since it is used only for the
+    // migration for the nft regenesis.
+    // Remove this function once the regenesis is complete and the tool is not
+    // needed anymore: ZKS-663
+    pub async fn get_all_balances(&mut self) -> QueryResult<Vec<StorageBalance>> {
+        let result = sqlx::query_as!(StorageBalance, "SELECT * FROM balances",)
+            .fetch_all(self.0.conn())
+            .await?;
+
+        Ok(result)
     }
 }

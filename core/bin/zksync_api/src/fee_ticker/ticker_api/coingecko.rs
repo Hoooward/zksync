@@ -1,5 +1,5 @@
 use super::{TokenPriceAPI, REQUEST_TIMEOUT};
-use anyhow::Error;
+use crate::fee_ticker::ticker_api::PriceError;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use num::rational::Ratio;
@@ -42,15 +42,21 @@ impl CoinGeckoAPI {
 
 #[async_trait]
 impl TokenPriceAPI for CoinGeckoAPI {
-    async fn get_price(&self, token_symbol: &str) -> Result<TokenPrice, Error> {
+    async fn get_price(&self, token_symbol: &str) -> Result<TokenPrice, PriceError> {
         let start = Instant::now();
+        let token_lowercase_symbol = token_symbol.to_lowercase();
         let token_id = self
             .token_ids
-            .get(&token_symbol.to_lowercase())
+            .get(&token_lowercase_symbol)
             .or_else(|| self.token_ids.get(token_symbol))
-            .ok_or_else(|| {
-                anyhow::format_err!("Token '{}' is not listed on CoinGecko", token_symbol)
-            })?;
+            .unwrap_or(&token_lowercase_symbol);
+        // TODO ZKS-595. Uncomment this code
+        // .ok_or_else(|| {
+        //     PriceError::token_not_found(format!(
+        //         "Token '{}' is not listed on CoinGecko",
+        //         token_symbol
+        //     ))
+        // })?;
 
         let market_chart_url = self
             .base_url
@@ -59,24 +65,22 @@ impl TokenPriceAPI for CoinGeckoAPI {
 
         // If we use 2 day interval we will get hourly prices and not minute by minute which makes
         // response faster and smaller
-        let request = self
+        let market_chart = self
             .client
             .get(market_chart_url)
-            .query(&[("vs_currency", "usd"), ("days", "2")]);
-
-        let api_request_future = tokio::time::timeout(REQUEST_TIMEOUT, request.send());
-
-        let market_chart = api_request_future
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[("vs_currency", "usd"), ("days", "2")])
+            .send()
             .await
-            .map_err(|_| anyhow::format_err!("CoinGecko API request timeout"))?
-            .map_err(|err| anyhow::format_err!("CoinGecko API request failed: {}", err))?
+            .map_err(|err| PriceError::api_error(format!("CoinGecko API request failed: {}", err)))?
             .json::<CoinGeckoMarketChart>()
-            .await?;
+            .await
+            .map_err(PriceError::api_error)?;
 
         let last_updated_timestamp_ms = market_chart
             .prices
             .last()
-            .ok_or_else(|| anyhow::format_err!("CoinGecko returned empty price data"))?
+            .ok_or_else(|| PriceError::api_error("CoinGecko returned empty price data"))?
             .0;
 
         let usd_prices = market_chart
@@ -94,8 +98,8 @@ impl TokenPriceAPI for CoinGeckoAPI {
         } else {
             usd_prices.min()
         };
-        let usd_price =
-            usd_price.ok_or_else(|| anyhow::format_err!("CoinGecko returned empty price data"))?;
+        let usd_price = usd_price
+            .ok_or_else(|| PriceError::api_error("CoinGecko returned empty price data"))?;
 
         let naive_last_updated = NaiveDateTime::from_timestamp(
             last_updated_timestamp_ms / 1_000,                      // ms to s

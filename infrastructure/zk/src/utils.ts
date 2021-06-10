@@ -15,7 +15,11 @@ const IGNORED_DIRS = [
     'generated',
     'grafonnet-lib',
     'prettier-config',
-    'lint-config'
+    'lint-config',
+    'cache',
+    'artifacts',
+    'typechain',
+    'binaryen'
 ];
 const IGNORED_FILES = ['KeysWithPlonkVerifier.sol', 'TokenInit.sol', '.tslintrc.js'];
 
@@ -36,16 +40,16 @@ export function spawn(command: string) {
     return new Promise((resolve, reject) => {
         child.on('error', reject);
         child.on('close', (code) => {
-            code == 0 ? resolve() : reject(`Child process exited with code ${code}`);
+            code == 0 ? resolve(code) : reject(`Child process exited with code ${code}`);
         });
     });
 }
 
 // executes a command in background and returns a child process handle
-// by default pipes data to parent's stdio but this can be overriden
+// by default pipes data to parent's stdio but this can be overridden
 export function background(command: string, stdio: any = 'inherit') {
     command = command.replace(/\n/g, ' ');
-    return _spawn(command, { stdio, shell: true, detached: true });
+    return _spawn(command, { stdio: stdio, shell: true, detached: true });
 }
 
 export async function confirmAction() {
@@ -123,4 +127,20 @@ export async function getUnignoredFiles(extension: string) {
     );
 
     return files;
+}
+
+export function web3Url() {
+    // @ts-ignore
+    return process.env.ETH_CLIENT_WEB3_URL.split(',')[0] as string;
+}
+
+export async function readZkSyncAbi() {
+    const zksync = process.env.ZKSYNC_HOME;
+    const path = `${zksync}/contracts/artifacts/cache/solpp-generated-contracts/ZkSync.sol/ZkSync.json`;
+
+    const fileContent = (await fs.promises.readFile(path)).toString();
+
+    const abi = JSON.parse(fileContent).abi;
+
+    return abi;
 }

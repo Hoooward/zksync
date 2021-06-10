@@ -27,6 +27,9 @@ use super::{
 };
 
 pub(super) mod convert {
+    use std::collections::HashMap;
+    use zksync_crypto::params::{MIN_NFT_TOKEN_ID, NFT_TOKEN_ID_VAL};
+
     use super::*;
 
     pub async fn account_state_from_storage(
@@ -35,17 +38,43 @@ pub(super) mod convert {
         account: &Account,
     ) -> QueryResult<AccountState> {
         let mut balances = BTreeMap::new();
+        let mut nfts = HashMap::new();
         for (token_id, balance) in account.get_nonzero_balances() {
-            let token_symbol = tokens
-                .token_symbol(storage, token_id)
-                .await?
-                .ok_or_else(|| unable_to_find_token(token_id))?;
-
-            balances.insert(token_symbol, balance);
+            match token_id.0 {
+                NFT_TOKEN_ID_VAL => {
+                    // Don't include special token to balances or nfts
+                }
+                MIN_NFT_TOKEN_ID..=NFT_TOKEN_ID_VAL => {
+                    // https://github.com/rust-lang/rust/issues/37854
+                    // Exclusive range is an experimental feature, but we have already checked the last value in the previous step
+                    nfts.insert(
+                        token_id,
+                        tokens
+                            .get_nft_by_id(storage, token_id)
+                            .await?
+                            .ok_or_else(|| unable_to_find_token(token_id))?
+                            .into(),
+                    );
+                }
+                _ => {
+                    let token_symbol = tokens
+                        .token_symbol(storage, token_id)
+                        .await?
+                        .ok_or_else(|| unable_to_find_token(token_id))?;
+                    balances.insert(token_symbol, balance);
+                }
+            }
         }
+        let minted_nfts = account
+            .minted_nfts
+            .iter()
+            .map(|(id, nft)| (*id, nft.clone().into()))
+            .collect();
 
         Ok(AccountState {
             balances,
+            nfts,
+            minted_nfts,
             nonce: account.nonce,
             pub_key_hash: account.pub_key_hash,
         })
@@ -80,8 +109,7 @@ pub(super) mod convert {
                 .await?
                 .ok_or_else(|| unable_to_find_token(token_id))?;
 
-            let expected_accept_block =
-                received_on_block as BlockNumber + confirmations_for_eth_event;
+            let expected_accept_block = confirmations_for_eth_event + (received_on_block as u32);
 
             let balance = balances
                 .entry(token_symbol)
@@ -102,7 +130,7 @@ pub(super) mod convert {
     pub fn validate_receipts_query(
         query: AccountReceiptsQuery,
     ) -> Result<(TxLocation, SearchDirection, BlockNumber), ApiError> {
-        if query.limit == 0 && query.limit > MAX_LIMIT {
+        if *query.limit == 0 && *query.limit > MAX_LIMIT {
             return Err(ApiError::bad_request("Incorrect limit")
                 .detail(format!("Limit should be between {} and {}", 1, MAX_LIMIT)));
         }
@@ -111,7 +139,7 @@ pub(super) mod convert {
             // Just try to fetch latest transactions.
             (None, None, None) => (
                 TxLocation {
-                    block: BlockNumber::MAX,
+                    block: BlockNumber(u32::MAX),
                     index: None,
                 },
                 SearchDirection::Older,
@@ -128,7 +156,7 @@ pub(super) mod convert {
     }
 
     pub fn tx_receipt_from_response(inner: AccountTxReceiptResponse) -> AccountTxReceipt {
-        let block = inner.block_number as BlockNumber;
+        let block = BlockNumber(inner.block_number as u32);
         let index = inner.block_index.map(|x| x as u32);
         let hash = TxHash::from_slice(&inner.tx_hash).unwrap_or_else(|| {
             panic!(
@@ -168,7 +196,7 @@ pub(super) mod convert {
     }
 
     pub fn op_receipt_from_response(inner: AccountOpReceiptResponse) -> AccountOpReceipt {
-        let block = inner.block_number as BlockNumber;
+        let block = BlockNumber(inner.block_number as u32);
         let index = inner.block_index as u32;
         let hash = H256::from_slice(&inner.eth_hash);
 

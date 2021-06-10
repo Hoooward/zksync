@@ -42,13 +42,15 @@ fn get_contract_address(deploy_script_out: &str) -> Option<(String, Address)> {
             String::from("CONTRACTS_UPGRADE_GATEKEEPER_ADDR"),
             Address::from_str(output).expect("can't parse contract address"),
         ))
-    } else if let Some(output) = deploy_script_out.strip_prefix("CONTRACTS_TEST_ERC20=0x") {
-        Some((
-            String::from("CONTRACTS_TEST_ERC20"),
-            Address::from_str(output).expect("can't parse contract address"),
-        ))
     } else {
-        None
+        deploy_script_out
+            .strip_prefix("CONTRACTS_TEST_ERC20=0x")
+            .map(|output| {
+                (
+                    String::from("CONTRACTS_TEST_ERC20"),
+                    Address::from_str(output).expect("can't parse contract address"),
+                )
+            })
     }
 }
 
@@ -72,13 +74,16 @@ fn run_external_command(command: &str, args: &[&str]) -> String {
 }
 
 pub fn js_revert_reason(tx_hash: &H256) -> String {
+    let web3_urls =
+        std::env::var("ETH_CLIENT_WEB3_URL").expect("ETH_CLIENT_WEB3_URL should be installed");
+    let web3_urls: Vec<&str> = web3_urls.split(',').collect();
     run_external_command(
         "zk",
         &[
             "run",
             "revert-reason",
             &format!("0x{:x}", tx_hash),
-            "http://localhost:7545",
+            web3_urls.first().expect("At least one should exist"),
         ],
     )
 }

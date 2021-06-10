@@ -1,15 +1,27 @@
+use std::collections::HashMap;
+
 use num::BigUint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use zksync_types::{AccountId, Address, Nonce, PubKeyHash, Token};
+
+use zksync_types::{AccountId, Address, Nonce, PubKeyHash, Token, TokenId, H256};
 use zksync_utils::{BigUintSerdeAsRadix10Str, BigUintSerdeWrapper};
 
 pub type Tokens = HashMap<String, Token>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NFT {
+    pub id: TokenId,
+    pub symbol: String,
+    pub creator_id: AccountId,
+    pub content_hash: H256,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountState {
     pub balances: HashMap<String, BigUintSerdeWrapper>,
+    pub nfts: HashMap<TokenId, NFT>,
     pub nonce: Nonce,
     pub pub_key_hash: PubKeyHash,
 }
@@ -127,6 +139,13 @@ pub struct OngoingDeposits {
     pub estimated_deposits_approval_block: Option<u64>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChangePubKeyFeeType {
+    Onchain,
+    ECDSA,
+    CREATE2,
+}
+
 /// Type of the fee calculation pattern.
 /// Unlike the `TxFeeTypes`, this enum represents the fee
 /// from the point of zkSync view, rather than from the users
@@ -139,10 +158,10 @@ pub enum OutputFeeType {
     TransferToNew,
     FastWithdraw,
     Withdraw,
-    ChangePubKey {
-        #[serde(rename = "onchainPubkeyAuth")]
-        onchain_pubkey_auth: bool,
-    },
+    ChangePubKey(ChangePubKeyFeeType),
+    MintNFT,
+    WithdrawNFT,
+    FastWithdrawNFT,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -157,6 +176,13 @@ pub struct Fee {
     pub gas_fee: BigUint,
     #[serde(with = "BigUintSerdeAsRadix10Str")]
     pub zkp_fee: BigUint,
+    #[serde(with = "BigUintSerdeAsRadix10Str")]
+    pub total_fee: BigUint,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BatchFee {
     #[serde(with = "BigUintSerdeAsRadix10Str")]
     pub total_fee: BigUint,
 }

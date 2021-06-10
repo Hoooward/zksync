@@ -13,11 +13,17 @@ const CONFIG_FILES = [
     'eth_client.toml',
     'eth_sender.toml',
     'eth_watch.toml',
+    'event_listener.toml',
+    'gateway_watcher.toml',
     'fee_ticker.toml',
     'misc.toml',
+    'dev_liquidity_token_watcher.toml',
     'prover.toml',
     'rust.toml',
-    'private.toml'
+    'private.toml',
+    'forced_exit_requests.toml',
+    'token_handler.toml',
+    'nft_factory.toml'
 ];
 
 async function getEnvironment(): Promise<string> {
@@ -143,7 +149,7 @@ export async function compileConfig(environment?: string) {
     let outputFileContents = `# This file is generated automatically by 'zk config compile'\n`;
     outputFileContents += `# Do not edit manually!\n\n`;
     variables.forEach((value: string, key: string) => {
-        outputFileContents += `${key}="${value}"\n`;
+        outputFileContents += `${key}=${value}\n`;
     });
 
     const outputFileName = path.join(envDirPath(), `${environment}.env`);

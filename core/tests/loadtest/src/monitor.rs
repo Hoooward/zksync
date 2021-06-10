@@ -7,10 +7,7 @@ use std::{
 };
 // External uses
 use futures::Future;
-use tokio::{
-    sync::{Mutex, MutexGuard},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, MutexGuard};
 // Workspace uses
 use zksync::{
     error::ClientError, ethereum::PriorityOpHolder, provider::Provider, types::BlockStatus,
@@ -25,7 +22,6 @@ use zksync_types::{
 use crate::{
     api::ApiDataPool,
     journal::{Journal, TxLifecycle, TxVariant},
-    utils::{wait_all_chunks, CHUNK_SIZES},
 };
 
 type SerialId = u64;
@@ -87,7 +83,7 @@ struct MonitorInner {
     current_stats: Stats,
     total_stats: Stats,
     journal: Journal,
-    pending_tasks: Vec<JoinHandle<()>>,
+    running_tasks_counter: usize,
 }
 
 /// Load monitor - measures the execution time of the main stages of the life cycle of
@@ -128,7 +124,7 @@ impl MonitorInner {
         if self.current_stats != stats {
             self.total_stats += self.current_stats;
 
-            log::trace!("Transactions {:?}", self.current_stats);
+            vlog::debug!("Transactions {:?}", self.current_stats);
 
             swap(&mut self.current_stats, &mut stats);
         }
@@ -147,7 +143,7 @@ impl Drop for MonitorInner {
     fn drop(&mut self) {
         self.total_stats += self.current_stats;
 
-        log::trace!("Total {:?}", self.total_stats);
+        vlog::debug!("Total {:?}", self.total_stats);
     }
 }
 
@@ -168,6 +164,7 @@ macro_rules! await_condition {
 impl Monitor {
     const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
     const POLLING_INTERVAL: Duration = Duration::from_millis(50);
+    const CONDITION_TIMEOUT: Duration = Duration::from_secs(1800);
 
     /// Creates a new load monitor from the zkSync network provider.
     pub async fn new(provider: RpcProvider) -> Self {
@@ -248,13 +245,14 @@ impl Monitor {
         tx_variant: TxVariant,
     ) {
         let monitor = self.clone();
-        let handle = tokio::spawn(async move {
+        self.spawn(async move {
             let tx_result = monitor
                 .clone()
                 .monitor_tx(created_at, sent_at, tx_hash, tx_variant)
                 .await;
 
-            if tx_result.is_err() {
+            if let Err(e) = tx_result.as_ref() {
+                vlog::warn!("Monitored transaction execution failed. {}", e);
                 monitor.log_event(Event::TxErrored(tx_hash)).await;
             }
 
@@ -266,7 +264,6 @@ impl Monitor {
 
             monitor.record_tx(tx_hash, tx_result).await;
         });
-        self.inner().await.pending_tasks.push(handle);
     }
 
     /// Waits for the transaction to reach the desired status.
@@ -275,7 +272,13 @@ impl Monitor {
         block_status: BlockStatus,
         tx_hash: TxHash,
     ) -> anyhow::Result<()> {
+        let start_at = Instant::now();
         await_condition!(Self::POLLING_INTERVAL, {
+            anyhow::ensure!(
+                start_at.elapsed() <= Self::CONDITION_TIMEOUT,
+                "`wait_for_tx` timeout has been reached."
+            );
+
             let info = self.provider.tx_info(tx_hash).await?;
             match block_status {
                 BlockStatus::Committed => match info.success {
@@ -303,7 +306,13 @@ impl Monitor {
         block_status: BlockStatus,
         priority_op: &PriorityOp,
     ) -> anyhow::Result<()> {
+        let start_at = Instant::now();
         await_condition!(Self::POLLING_INTERVAL, {
+            anyhow::ensure!(
+                start_at.elapsed() <= Self::CONDITION_TIMEOUT,
+                "`wait_for_priority_op` timeout has been reached."
+            );
+
             let info = self
                 .provider
                 .ethop_info(priority_op.serial_id as u32)
@@ -318,18 +327,19 @@ impl Monitor {
         Ok(())
     }
 
-    /// Waits for all pending zkSync operations to verify.
+    /// Waits for all running tasks to complete.
     pub async fn wait_for_verify(&self) {
-        let tasks = self
-            .inner()
-            .await
-            .pending_tasks
-            .drain(..)
-            .collect::<Vec<_>>();
+        vlog::debug!(
+            "Awaiting for verification, pending tasks {}",
+            self.inner().await.running_tasks_counter
+        );
 
-        log::trace!("Awaiting for verification, pending tasks {}", tasks.len());
+        await_condition!(
+            Self::POLLING_INTERVAL,
+            self.inner().await.running_tasks_counter == 0
+        );
 
-        wait_all_chunks(CHUNK_SIZES, tasks).await;
+        vlog::debug!("All pending tasks have been finished");
     }
 
     /// Enables a collecting metrics process.
@@ -348,7 +358,7 @@ impl Monitor {
 
     /// Returns the priority operation for the given transaction and monitors its progress in
     /// the zkSync network.
-    pub(crate) async fn get_priority_op<S: EthereumSigner + Clone>(
+    pub(crate) async fn get_priority_op<S: EthereumSigner>(
         &self,
         eth_provider: &EthereumProvider<S>,
         eth_tx_hash: H256,
@@ -368,19 +378,18 @@ impl Monitor {
 
         let monitor = self.clone();
         let priority_op2 = priority_op.clone();
-        let handle = tokio::spawn(async move {
+        self.spawn(async move {
             if let Err(e) = monitor
                 .clone()
                 .monitor_priority_op(priority_op2.clone())
                 .await
             {
-                log::warn!("Monitored priority op execution failed. {}", e);
+                vlog::warn!("Monitored priority op execution failed. {}", e);
                 monitor
                     .log_event(Event::OpErrored(priority_op2.serial_id))
                     .await;
             }
         });
-        self.inner().await.pending_tasks.push(handle);
 
         Ok(priority_op)
     }
@@ -422,7 +431,7 @@ impl Monitor {
             self.api_data_pool
                 .write()
                 .await
-                .store_block(block.block_number as BlockNumber);
+                .store_block(BlockNumber(block.block_number as u32));
         }
 
         Ok(TxLifecycle {
@@ -450,5 +459,24 @@ impl Monitor {
             .await;
 
         Ok(())
+    }
+
+    /// Spawns a task parallely and increment the running tasks counter until the task will finish.
+    fn spawn<T>(&self, task: T)
+    where
+        T: Future + Send + 'static,
+        T::Output: Send + 'static,
+    {
+        let monitor = self.clone();
+        let task = async move {
+            monitor.inner().await.running_tasks_counter += 1;
+            let result = task.await;
+            monitor.inner().await.running_tasks_counter -= 1;
+            let remaining = monitor.inner().await.running_tasks_counter;
+            vlog::trace!("Task finished, remaining tasks {}", remaining);
+
+            result
+        };
+        tokio::spawn(task);
     }
 }

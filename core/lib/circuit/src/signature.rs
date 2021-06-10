@@ -34,8 +34,7 @@ pub struct AllocatedSignatureData<E: JubjubEngine> {
 
 impl<E: JubjubEngine> AllocatedSignatureData<E> {
     pub fn get_packed_r(&self) -> Vec<Boolean> {
-        let mut r_packed_bits = vec![];
-        r_packed_bits.push(self.sig_r_x_bit.clone());
+        let mut r_packed_bits = vec![self.sig_r_x_bit.clone()];
         r_packed_bits.extend(self.sig_r_y_bits.clone());
         reverse_bytes(&r_packed_bits)
     }
@@ -73,7 +72,7 @@ pub fn unpack_point_if_possible<E: RescueEngine + JubjubEngine, CS: ConstraintSy
         &r_y.get_number(),
         &jubjub_params,
     )?;
-    log::debug!(
+    vlog::debug!(
         "r_recovered.x={:?} \n r_recovered.y={:?}",
         r_recovered.get_x().get_value(),
         r_recovered.get_y().get_value()
@@ -147,12 +146,12 @@ pub fn verify_circuit_signature<E: RescueEngine + JubjubEngine, CS: ConstraintSy
         pk: signer_key.point.clone(),
     };
 
-    log::debug!(
+    vlog::debug!(
         "signature_r_x={:?} \n signature_r_y={:?}",
         signature.r.get_x().get_value(),
         signature.r.get_y().get_value()
     );
-    log::debug!("s={:?}", signature.s.get_value());
+    vlog::debug!("s={:?}", signature.s.get_value());
 
     let serialized_tx_bits = {
         let mut temp_bits = op_data.first_sig_msg.get_bits_le();
@@ -189,9 +188,9 @@ pub fn verify_circuit_signature<E: RescueEngine + JubjubEngine, CS: ConstraintSy
         generator,
     )?;
 
-    log::debug!("is_sig_verified={:?}", is_sig_verified.get_value());
-    log::debug!("is_sig_r_correct={:?}", is_sig_r_correct.get_value());
-    log::debug!(
+    vlog::debug!("is_sig_verified={:?}", is_sig_verified.get_value());
+    vlog::debug!("is_sig_r_correct={:?}", is_sig_r_correct.get_value());
+    vlog::debug!(
         "signer_key.is_correctly_unpacked={:?}",
         signer_key.is_correctly_unpacked.get_value()
     );
@@ -438,10 +437,10 @@ where
         Expression::from(rhs_y),
         Expression::from(sb_y),
     )?);
-    Ok(multi_and(
+    multi_and(
         cs.namespace(|| "is signature correct"),
         &[r_is_not_small_order, is_x_correct, is_y_correct],
-    )?)
+    )
 }
 
 pub fn is_not_small_order<CS, E>(

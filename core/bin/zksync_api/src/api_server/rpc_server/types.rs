@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 // Workspace uses
 use zksync_storage::StorageProcessor;
 use zksync_types::{
-    tx::TxEthSignature, Account, AccountId, Address, Nonce, PriorityOp, PubKeyHash,
+    tx::TxEthSignatureVariant, Account, AccountId, Address, Nonce, PriorityOp, PubKeyHash, TokenId,
     ZkSyncPriorityOp, ZkSyncTx,
 };
 use zksync_utils::{BigUintSerdeAsRadix10Str, BigUintSerdeWrapper};
+
+// This wrong dependency, but the whole data about account info stored in this place
+use zksync_api_client::rest::v1::accounts::NFT;
 
 // Local uses
 use crate::{
@@ -22,13 +25,16 @@ use crate::{
 #[serde(rename_all = "camelCase")]
 pub struct TxWithSignature {
     pub tx: ZkSyncTx,
-    pub signature: Option<TxEthSignature>,
+    #[serde(default)]
+    pub signature: TxEthSignatureVariant,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseAccountState {
     pub balances: HashMap<String, BigUintSerdeWrapper>,
+    pub nfts: HashMap<TokenId, NFT>,
+    pub minted_nfts: HashMap<TokenId, NFT>,
     pub nonce: Nonce,
     pub pub_key_hash: PubKeyHash,
 }
@@ -49,6 +55,8 @@ impl ResponseAccountState {
 
         Ok(Self {
             balances,
+            nfts: inner.nfts,
+            minted_nfts: inner.minted_nfts,
             nonce: inner.nonce,
             pub_key_hash: inner.pub_key_hash,
         })
@@ -85,7 +93,7 @@ impl DepositingAccountBalances {
         let mut balances = HashMap::new();
 
         for op in pending_ops.deposits {
-            let token_symbol = if op.token_id == 0 {
+            let token_symbol = if *op.token_id == 0 {
                 "ETH".to_string()
             } else {
                 tokens
@@ -163,7 +171,7 @@ pub struct ContractAddressResp {
 #[serde(rename_all = "camelCase")]
 pub struct OngoingDeposit {
     pub received_on_block: u64,
-    pub token_id: u16,
+    pub token_id: TokenId,
     pub amount: u128,
     pub eth_tx_hash: String,
 }

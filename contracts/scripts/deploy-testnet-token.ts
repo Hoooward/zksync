@@ -1,17 +1,18 @@
 import { deployContract } from 'ethereum-waffle';
-import { ethers, Wallet } from 'ethers';
+import { Wallet } from 'ethers';
 import { readContractCode } from '../src.ts/deploy';
 import { encodeConstructorArgs, publishSourceCodeToEtherscan } from '../src.ts/publish-utils';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ArgumentParser } from 'argparse';
+import { web3Provider } from './utils';
 
 const mainnetTokens = require(`${process.env.ZKSYNC_HOME}/etc/tokens/mainnet`);
 
 const testConfigPath = path.join(process.env.ZKSYNC_HOME as string, `etc/test_config/constant`);
 const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, { encoding: 'utf-8' }));
 
-(async () => {
+async function main() {
     const parser = new ArgumentParser({
         version: '0.1.0',
         addHelp: true,
@@ -25,7 +26,7 @@ const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, {
     parser.addArgument('--deployerPrivateKey', { required: false, help: 'Wallet used to deploy contracts' });
     const args = parser.parseArgs(process.argv.slice(2));
 
-    const provider = new ethers.providers.JsonRpcProvider(process.env.ETH_CLIENT_WEB3_URL);
+    const provider = web3Provider();
     const wallet = args.deployerPrivateKey
         ? new Wallet(args.deployerPrivateKey, provider)
         : Wallet.fromMnemonic(ethTestConfig.mnemonic, "m/44'/60'/0'/0/1").connect(provider);
@@ -78,4 +79,11 @@ const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, {
         `${process.env.ZKSYNC_HOME}/etc/tokens/${process.env.CHAIN_ETH_NETWORK}.json`,
         JSON.stringify(result, null, 2)
     );
-})();
+}
+
+main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+        console.error('Error:', err.message || err);
+        process.exit(1);
+    });

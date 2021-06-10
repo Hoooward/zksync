@@ -9,11 +9,62 @@ components, the logs will have the following format:
 
 ## Unreleased
 
+### Removed
+
 ### Changed
 
 ### Added
 
+- (`token_list_manager`): CLI for updating to new version of a previously saved list of trusted tokens.
+
+- (`loadnext`): Crate, a new implementation of the loadtest for zkSync.
+
 ### Fixed
+
+## Release 2021-02-19
+
+### Removed
+
+- (`ci/Dockerfile`): `docker/ci` folder was removed, because it is outdated.
+
+### Changed
+
+- (`fee-seller`): migrating to zksync V0.9.0.
+
+### Added
+
+- (`read-variable`): tool for read private and public variables from contracts.
+- (`reading-tool`): tool for reading test config.
+- (`explorer`): column "Can be used to pay fees" for tokens.
+
+### Fixed
+
+- (`fee-seller`): Sends all Ethereum transactions with sequential nonce starting with the next available not finalized
+  nonce. Thereby resend stuck transactions after the next time you run the script.
+
+- (`explorer`): Bug with 'Click to copy' button for account address.
+
+## Release 2021-02-02
+
+### Removed
+
+- (`explorer`): 'localStorage' caching. It fixed the bug when the block have not updated the "Initiated" status.
+
+### Changed
+
+- (`explorer`): Deposits from and withdrawals to an L1 account are only displayed in the history of operation initiator.
+
+### Added
+
+- (`explorer`): `completeWithdrawals` tx hash was added to the explorer.
+
+### Fixed
+
+- (`explorer`): Bug with not displaying old blocks was fixed.
+- (`explorer`): Bug with updating transaction data after searching another transaction was fixed.
+- (`explorer`): Fixed processing of transactions with different prefixes.
+- (`explorer`): bug with not displaying some deposits and withdrawals for the accounts was fixed by not taking account
+  address case into account.
 
 ## Release 2021-01-12
 

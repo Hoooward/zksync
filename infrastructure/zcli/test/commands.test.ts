@@ -23,7 +23,12 @@ describe('Fetching Information', () => {
     let transfer_hash: string;
 
     before('make some deposits & transactions', async () => {
-        const ethProvider = new ethers.providers.JsonRpcProvider();
+        let ethProvider;
+        if (process.env.CI == '1') {
+            ethProvider = new ethers.providers.JsonRpcProvider('http://geth:8545');
+        } else {
+            ethProvider = new ethers.providers.JsonRpcProvider();
+        }
         const syncProvider = await zksync.getDefaultProvider('localhost', 'HTTP');
         const ethWallet = ethers.Wallet.fromMnemonic(ethTestConfig.test_mnemonic as string, "m/44'/60'/0'/0/0").connect(
             ethProvider
@@ -48,7 +53,8 @@ describe('Fetching Information', () => {
         });
         await Promise.all([ethDeposit.awaitReceipt(), daiDeposit.awaitReceipt()]);
         const changePubkey = await aliceWallet.setSigningKey({
-            feeToken: 'ETH'
+            feeToken: 'ETH',
+            ethAuthType: 'ECDSA'
         });
         await changePubkey.awaitReceipt();
         const txHandle = await aliceWallet.syncTransfer({

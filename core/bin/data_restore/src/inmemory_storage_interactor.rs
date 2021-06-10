@@ -5,14 +5,14 @@ use web3::types::Address;
 
 use zksync_types::block::Block;
 use zksync_types::{
-    Account, AccountId, AccountMap, AccountUpdate, AccountUpdates, Action, EncodedProofPlonk,
-    Operation, Token, TokenGenesisListItem,
+    Account, AccountId, AccountMap, AccountUpdate, AccountUpdates, Action, BlockNumber,
+    NewTokenEvent, Operation, Token, TokenId, TokenInfo,
 };
 
 use crate::{
     data_restore_driver::StorageUpdateState,
     events::{BlockEvent, EventType},
-    events_state::{EventsState, NewTokenEvent},
+    events_state::EventsState,
     rollup_ops::RollupOpsBlock,
     storage_interactor::StorageInteractor,
     storage_interactor::StoredTreeState,
@@ -21,11 +21,12 @@ use crate::{
 pub struct InMemoryStorageInteractor {
     rollups: Vec<RollupOpsBlock>,
     storage_state: StorageUpdateState,
-    tokens: HashMap<u16, Token>,
+    tokens: HashMap<TokenId, Token>,
     events_state: Vec<BlockEvent>,
     last_watched_block: u64,
-    last_committed_block: u32,
-    last_verified_block: u32,
+    #[allow(dead_code)]
+    last_committed_block: BlockNumber,
+    last_verified_block: BlockNumber,
     accounts: AccountMap,
 }
 
@@ -51,7 +52,7 @@ impl StorageInteractor for InMemoryStorageInteractor {
 
         let verify_op = Operation {
             action: Action::Verify {
-                proof: Box::new(EncodedProofPlonk::default()),
+                proof: Box::new(Default::default()),
             },
             block: block.clone(),
             id: None,
@@ -60,19 +61,18 @@ impl StorageInteractor for InMemoryStorageInteractor {
         self.last_committed_block = commit_op.block.block_number;
         self.last_verified_block = verify_op.block.block_number;
 
-        self.commit_state_update(block.block_number, accounts_updated);
+        self.commit_state_update(*block.block_number, accounts_updated);
         self.storage_state = StorageUpdateState::None
         // TODO save operations
     }
 
-    async fn store_token(&mut self, token: TokenGenesisListItem, token_id: u16) {
+    async fn store_token(&mut self, token: TokenInfo, token_id: TokenId) {
         let token = Token {
             id: token_id,
             symbol: token.symbol,
-            address: token.address[2..]
-                .parse()
-                .expect("failed to parse token address"),
+            address: token.address,
             decimals: token.decimals,
+            is_nft: false,
         };
         self.tokens.insert(token_id, token);
     }
@@ -85,14 +85,20 @@ impl StorageInteractor for InMemoryStorageInteractor {
     ) {
         self.events_state = block_events.to_vec();
 
-        for &NewTokenEvent { id, address } in tokens {
+        for &NewTokenEvent {
+            id,
+            address,
+            eth_block_number: _,
+        } in tokens
+        {
             self.tokens.insert(
                 id,
                 Token {
                     id,
                     address,
-                    symbol: format!("ERC20-{}", id),
+                    symbol: format!("ERC20-{}", *id),
                     decimals: 18,
+                    is_nft: false,
                 },
             );
         }
@@ -101,8 +107,12 @@ impl StorageInteractor for InMemoryStorageInteractor {
         self.storage_state = StorageUpdateState::Events;
     }
 
-    async fn save_genesis_tree_state(&mut self, genesis_acc_update: AccountUpdate) {
-        self.commit_state_update(0, vec![(0, genesis_acc_update)]);
+    async fn save_genesis_tree_state(&mut self, genesis_updates: &[(AccountId, AccountUpdate)]) {
+        self.commit_state_update(0, genesis_updates.to_vec());
+    }
+
+    async fn save_special_token(&mut self, token: Token) {
+        self.tokens.insert(token.id, token);
     }
 
     async fn get_block_events_state_from_storage(&mut self) -> EventsState {
@@ -123,7 +133,7 @@ impl StorageInteractor for InMemoryStorageInteractor {
             last_block_number: self.last_verified_block,
             account_map: self.accounts.clone(),
             unprocessed_prior_ops: 0,
-            fee_acc_id: 0,
+            fee_acc_id: AccountId(0),
         }
     }
 
@@ -148,8 +158,8 @@ impl InMemoryStorageInteractor {
             tokens: Default::default(),
             events_state: vec![],
             last_watched_block: 0,
-            last_committed_block: 0,
-            last_verified_block: 0,
+            last_committed_block: BlockNumber(0),
+            last_verified_block: BlockNumber(0),
             accounts: Default::default(),
         }
     }
@@ -236,6 +246,21 @@ impl InMemoryStorageInteractor {
                         .expect("In tests this account should be stored");
                     account.nonce = max(account.nonce, *new_nonce);
                     account.pub_key_hash = *new_pub_key_hash;
+                }
+                AccountUpdate::MintNFT { ref token } => {
+                    self.tokens.insert(
+                        token.id,
+                        Token {
+                            id: token.id,
+                            address: token.address,
+                            symbol: token.symbol.clone(),
+                            decimals: 0,
+                            is_nft: true,
+                        },
+                    );
+                }
+                AccountUpdate::RemoveNFT { ref token } => {
+                    self.tokens.remove(&token.id);
                 }
             }
         }

@@ -1,37 +1,41 @@
 // External imports
+use chrono::{Duration, Utc};
 // Workspace imports
-use zksync_types::ActionType;
+use zksync_types::{aggregated_operations::AggregatedActionType, BlockNumber};
 // Local imports
-use crate::tests::db_test;
 use crate::{
     chain::{
         block::BlockSchema,
         operations::{
-            records::{NewExecutedPriorityOperation, NewExecutedTransaction, NewOperation},
+            records::{NewExecutedPriorityOperation, NewExecutedTransaction},
             OperationsSchema,
         },
     },
+    test_data::gen_unique_aggregated_operation,
+    tests::db_test,
     QueryResult, StorageProcessor,
 };
 
 /// Checks the save&load routine for unconfirmed operations.
 #[db_test]
-async fn operations(mut storage: StorageProcessor<'_>) -> QueryResult<()> {
+async fn aggregated_operations(mut storage: StorageProcessor<'_>) -> QueryResult<()> {
     let block_number = 1;
-    let action_type = ActionType::COMMIT;
+    let action_type = AggregatedActionType::CommitBlocks;
     OperationsSchema(&mut storage)
-        .store_operation(NewOperation {
-            block_number,
-            action_type: action_type.to_string(),
-        })
+        .store_aggregated_action(gen_unique_aggregated_operation(
+            BlockNumber(block_number),
+            action_type,
+            100,
+        ))
         .await?;
 
     let stored_operation = OperationsSchema(&mut storage)
-        .get_operation(block_number as u32, action_type)
+        .get_stored_aggregated_operation(BlockNumber(block_number as u32), action_type)
         .await
         .unwrap();
 
-    assert_eq!(stored_operation.block_number, 1);
+    assert_eq!(stored_operation.from_block, 1);
+    assert_eq!(stored_operation.to_block, 1);
     assert_eq!(stored_operation.action_type, action_type.to_string());
     assert_eq!(stored_operation.confirmed, false);
 
@@ -186,7 +190,7 @@ async fn duplicated_operations(mut storage: StorageProcessor<'_>) -> QueryResult
 
     // Get the block transactions and check if there are exactly 2 txs.
     let block_txs = BlockSchema(&mut storage)
-        .get_block_transactions(BLOCK_NUMBER as u32)
+        .get_block_transactions(BlockNumber(BLOCK_NUMBER as u32))
         .await?;
 
     assert_eq!(block_txs.len(), 2);
@@ -194,7 +198,7 @@ async fn duplicated_operations(mut storage: StorageProcessor<'_>) -> QueryResult
     Ok(())
 }
 
-/// Checks that sending a successfull operation after a failed one works.
+/// Checks that sending a successful operation after a failed one works.
 #[db_test]
 async fn transaction_resent(mut storage: StorageProcessor<'_>) -> QueryResult<()> {
     const BLOCK_NUMBER: i64 = 1;
@@ -244,7 +248,7 @@ async fn transaction_resent(mut storage: StorageProcessor<'_>) -> QueryResult<()
 
     // Get the block transactions and check if there is exactly 1 tx (failed tx not copied but replaced).
     let block_txs = BlockSchema(&mut storage)
-        .get_block_transactions(BLOCK_NUMBER as u32)
+        .get_block_transactions(BlockNumber(BLOCK_NUMBER as u32))
         .await?;
     assert_eq!(block_txs.len(), 1);
 
@@ -264,9 +268,182 @@ async fn transaction_resent(mut storage: StorageProcessor<'_>) -> QueryResult<()
 
     // ...and there still must be one operation.
     let block_txs = BlockSchema(&mut storage)
-        .get_block_transactions(BLOCK_NUMBER as u32)
+        .get_block_transactions(BlockNumber(BLOCK_NUMBER as u32))
         .await?;
     assert_eq!(block_txs.len(), 1);
+
+    Ok(())
+}
+
+/// Checks that rejected transactions are removed correctly depending on the given age limit.
+#[db_test]
+async fn remove_rejected_transactions(mut storage: StorageProcessor<'_>) -> QueryResult<()> {
+    const BLOCK_NUMBER: i64 = 1;
+    // Two failed transactions created a week and two weeks ago respectively and one successful.
+    let timestamp_1 = Utc::now() - Duration::weeks(1);
+    let executed_tx_1 = NewExecutedTransaction {
+        block_number: BLOCK_NUMBER,
+        tx_hash: vec![0x12, 0xAD, 0xBE, 0xEF],
+        tx: Default::default(),
+        operation: Default::default(),
+        from_account: Default::default(),
+        to_account: None,
+        success: false,
+        fail_reason: None,
+        block_index: None,
+        primary_account_address: Default::default(),
+        nonce: Default::default(),
+        created_at: timestamp_1,
+        eth_sign_data: None,
+        batch_id: None,
+    };
+    let timestamp_2 = timestamp_1 - Duration::weeks(1);
+    let mut executed_tx_2 = executed_tx_1.clone();
+    // Set new timestamp and different tx_hash since it's a PK.
+    executed_tx_2.created_at = timestamp_2;
+    executed_tx_2.tx_hash = vec![0, 11, 21, 5];
+    // Successful one.
+    let mut executed_tx_3 = executed_tx_1.clone();
+    executed_tx_3.success = true;
+    executed_tx_3.tx_hash = vec![1, 1, 2, 30];
+    executed_tx_3.created_at = timestamp_2 - Duration::weeks(1);
+    // Store them.
+    storage
+        .chain()
+        .operations_schema()
+        .store_executed_tx(executed_tx_1)
+        .await?;
+    storage
+        .chain()
+        .operations_schema()
+        .store_executed_tx(executed_tx_2)
+        .await?;
+    storage
+        .chain()
+        .operations_schema()
+        .store_executed_tx(executed_tx_3)
+        .await?;
+    // First check, no transactions removed.
+    storage
+        .chain()
+        .operations_schema()
+        .remove_rejected_transactions(Duration::weeks(3))
+        .await?;
+    let block_number = BlockNumber(0);
+    let count = storage
+        .chain()
+        .stats_schema()
+        .count_outstanding_proofs(block_number)
+        .await?;
+    assert_eq!(count, 3);
+    // Second transaction should be removed.
+    storage
+        .chain()
+        .operations_schema()
+        .remove_rejected_transactions(Duration::days(10))
+        .await?;
+    let count = storage
+        .chain()
+        .stats_schema()
+        .count_outstanding_proofs(block_number)
+        .await?;
+    assert_eq!(count, 2);
+    // Finally, no rejected transactions remain.
+    storage
+        .chain()
+        .operations_schema()
+        .remove_rejected_transactions(Duration::days(4))
+        .await?;
+    let count = storage
+        .chain()
+        .stats_schema()
+        .count_outstanding_proofs(block_number)
+        .await?;
+    assert_eq!(count, 1);
+    // The last one is indeed succesful.
+    let count = storage
+        .chain()
+        .stats_schema()
+        .count_total_transactions()
+        .await?;
+    assert_eq!(count, 1);
+
+    Ok(())
+}
+
+/// Checks if executed_priority_operations are removed correctly.
+#[db_test]
+async fn test_remove_executed_priority_operations(
+    mut storage: StorageProcessor<'_>,
+) -> QueryResult<()> {
+    // Insert 5 priority operations.
+    for block_number in 1..=5 {
+        let executed_priority_op = NewExecutedPriorityOperation {
+            block_number,
+            block_index: 1,
+            operation: Default::default(),
+            from_account: Default::default(),
+            to_account: Default::default(),
+            priority_op_serialid: block_number,
+            deadline_block: 100,
+            eth_hash: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            eth_block: 10,
+            created_at: chrono::Utc::now(),
+        };
+        OperationsSchema(&mut storage)
+            .store_executed_priority_op(executed_priority_op)
+            .await?;
+    }
+
+    // Remove priority operation with block numbers greater than 3.
+    OperationsSchema(&mut storage)
+        .remove_executed_priority_operations(BlockNumber(3))
+        .await?;
+
+    // Check that priority operation from the 3rd block is present and from the 4th is not.
+    let block3_txs = BlockSchema(&mut storage)
+        .get_block_transactions(BlockNumber(3))
+        .await?;
+    assert!(!block3_txs.is_empty());
+
+    let block4_txs = BlockSchema(&mut storage)
+        .get_block_transactions(BlockNumber(4))
+        .await?;
+    assert!(block4_txs.is_empty());
+
+    Ok(())
+}
+
+/// Checks if ethereum unprocessed aggregated operations are removed correctly.
+#[db_test]
+async fn test_remove_eth_unprocessed_aggregated_ops(
+    mut storage: StorageProcessor<'_>,
+) -> QueryResult<()> {
+    let block_number = 1;
+    let action_type = AggregatedActionType::CommitBlocks;
+    // Save commit aggregated operation.
+    OperationsSchema(&mut storage)
+        .store_aggregated_action(gen_unique_aggregated_operation(
+            BlockNumber(block_number),
+            action_type,
+            100,
+        ))
+        .await?;
+    // Add this operation to eth_unprocessed_aggregated_ops table.
+    storage
+        .ethereum_schema()
+        .restore_unprocessed_operations()
+        .await?;
+    // Remove ethereum unprocessed aggregated operations.
+    OperationsSchema(&mut storage)
+        .remove_eth_unprocessed_aggregated_ops()
+        .await?;
+    let unprocessed_op_count = storage
+        .ethereum_schema()
+        .load_unconfirmed_operations()
+        .await?
+        .len();
+    assert_eq!(unprocessed_op_count, 0);
 
     Ok(())
 }

@@ -9,10 +9,9 @@ use zksync_crypto::{
     rand::{Rng, SeedableRng, XorShiftRng},
     PrivateKey,
 };
-use zksync_types::tx::PackedEthSignature;
 use zksync_types::{
-    Account, AccountId, AccountUpdate, PubKeyHash, SignedZkSyncTx, TokenId, ZkSyncPriorityOp,
-    ZkSyncTx,
+    tx::PackedEthSignature, Account, AccountId, AccountUpdate, PubKeyHash, SignedZkSyncTx, TokenId,
+    ZkSyncPriorityOp, ZkSyncTx, NFT,
 };
 
 type BoundAccountUpdates = [(AccountId, AccountUpdate)];
@@ -39,6 +38,27 @@ impl PlasmaTestBuilder {
             rng: XorShiftRng::from_seed([1, 2, 3, 4]),
             state: ZkSyncState::empty(),
         }
+    }
+
+    pub fn mint_nft(
+        &mut self,
+        token_id: TokenId,
+        content_hash: H256,
+        recipient_id: AccountId,
+        creator_id: AccountId,
+    ) {
+        let creator_address = self.state.get_account(creator_id).unwrap().address;
+        let nft = NFT::new(
+            token_id,
+            0,
+            creator_id,
+            creator_address,
+            Default::default(),
+            None,
+            content_hash,
+        );
+        self.state.nfts.insert(token_id, nft);
+        self.set_balance(recipient_id, token_id, 1u32);
     }
 
     pub fn add_account(&mut self, state: AccountState) -> (AccountId, Account, PrivateKey) {
@@ -106,7 +126,7 @@ impl PlasmaTestBuilder {
     ) {
         let mut state_clone = self.state.clone();
         let op_successes = self.state.execute_txs_batch(txs);
-        let mut updates: Vec<(u32, zksync_types::AccountUpdate)> = Vec::new();
+        let mut updates: Vec<(AccountId, AccountUpdate)> = Vec::new();
         for result in op_successes {
             updates.append(&mut result.unwrap().updates);
         }
@@ -166,26 +186,26 @@ impl PlasmaTestBuilder {
 fn test_tree_state() {
     let mut state = ZkSyncState::empty();
     let empty_root = state.root_hash();
-    state.insert_account(0, Default::default());
+    state.insert_account(AccountId(0), Default::default());
     let empty_acc_root = state.root_hash();
 
     // Tree contains "empty" accounts by default, inserting an empty account shouldn't change state.
     assert_eq!(empty_root, empty_acc_root);
 
     let mut balance_account = Account::default();
-    balance_account.set_balance(0, 100u64.into());
-    state.insert_account(1, balance_account.clone());
+    balance_account.set_balance(TokenId(0), 100u64.into());
+    state.insert_account(AccountId(1), balance_account.clone());
     let balance_root = state.root_hash();
 
-    balance_account.set_balance(0, 0u64.into());
-    state.insert_account(1, balance_account.clone());
+    balance_account.set_balance(TokenId(0), 0u64.into());
+    state.insert_account(AccountId(1), balance_account.clone());
     let no_balance_root = state.root_hash();
 
     // Account with manually set 0 token amount should be considered empty as well.
     assert_eq!(no_balance_root, empty_acc_root);
 
-    balance_account.set_balance(0, 100u64.into());
-    state.insert_account(1, balance_account);
+    balance_account.set_balance(TokenId(0), 100u64.into());
+    state.insert_account(AccountId(1), balance_account);
     let restored_balance_root = state.root_hash();
 
     // After we restored previously observed balance, root should be identical.

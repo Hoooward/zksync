@@ -94,6 +94,7 @@ export async function inDocker(command: string, timeout: number) {
 export async function all() {
     await server();
     await api();
+    await withdrawalHelpers();
     await zcli();
     await rustSDK();
     // have to kill server before running data-restore
@@ -113,12 +114,14 @@ export async function server() {
     await utils.spawn('yarn ts-tests test');
 }
 
+export async function withdrawalHelpers() {
+    await utils.spawn('yarn ts-tests withdrawal-helpers-test');
+}
+
 export async function testkit(command: string, timeout: number) {
     let containerID = '';
-    const prevUrl = process.env.ETH_CLIENT_WEB3_URL;
-    if (process.env.ZKSYNC_ENV == 'ci') {
-        process.env.ETH_CLIENT_WEB3_URL = 'http://geth-fast:8545';
-    } else if (process.env.ZKSYNC_ENV == 'dev') {
+    const prevUrls = process.env.ETH_CLIENT_WEB3_URL?.split(',')[0];
+    if (process.env.ZKSYNC_ENV == 'dev' && process.env.CI != '1') {
         const { stdout } = await utils.exec('docker run --rm -d -p 7545:8545 matterlabs/geth:latest fast');
         containerID = stdout;
         process.env.ETH_CLIENT_WEB3_URL = 'http://localhost:7545';
@@ -141,7 +144,7 @@ export async function testkit(command: string, timeout: number) {
     // but be careful! this is not called upon explicit termination
     // e.g. on SIGINT or process.exit()
     process.on('beforeExit', async (code) => {
-        if (process.env.ZKSYNC_ENV == 'dev') {
+        if (process.env.ZKSYNC_ENV == 'dev' && process.env.CI != '1') {
             try {
                 // probably should be replaced with child_process.execSync in future
                 // to change the hook to program.on('exit', ...)
@@ -149,7 +152,7 @@ export async function testkit(command: string, timeout: number) {
             } catch {
                 console.error('Problem killing', containerID);
             }
-            process.env.ETH_CLIENT_WEB3_URL = prevUrl;
+            process.env.ETH_CLIENT_WEB3_URL = prevUrls;
             // this has to be here - or else we will call this hook again
             process.exit(code);
         }
@@ -159,14 +162,16 @@ export async function testkit(command: string, timeout: number) {
     await run.verifyKeys.unpack();
     await contract.build();
 
-    if (command == 'block-sizes') {
-        await utils.spawn('cargo run --bin block_sizes_test --release');
+    if (command.includes('block_sizes_test ')) {
+        await utils.spawn(`cargo run --release --bin ${command}`);
     } else if (command == 'fast') {
-        await utils.spawn('cargo run --bin testkit_tests --release');
+        // await utils.spawn('cargo run --bin testkit_tests --release');
         await utils.spawn('cargo run --bin gas_price_test --release');
-        await utils.spawn('cargo run --bin migration_test --release');
-        await utils.spawn('cargo run --bin revert_blocks_test --release');
-        await utils.spawn('cargo run --bin exodus_test --release');
+        // await utils.spawn('cargo run --bin revert_blocks_test --release');
+        // await utils.spawn('cargo run --bin migration_test --release');
+        // await utils.spawn('cargo run --bin exodus_test --release');
+    } else {
+        await utils.spawn(`cargo run --bin ${command} --release`);
     }
 }
 
@@ -209,6 +214,14 @@ command
     });
 
 command
+    .command('withdrawal-helpers')
+    .description('run withdrawal helpers integration tests')
+    .option('--with-server')
+    .action(async (cmd: Command) => {
+        cmd.withServer ? await withServer(withdrawalHelpers, 1200) : await withdrawalHelpers();
+    });
+
+command
     .command('rust-sdk')
     .description('run rust SDK integration tests')
     .option('--with-server')
@@ -227,10 +240,15 @@ command
 command
     .command('testkit [mode]')
     .description('run testkit tests')
-    .action(async (mode?: string) => {
-        mode = mode || 'fast';
-        if (mode != 'fast' && mode != 'block-sizes') {
-            throw new Error('modes are either "fast" or "block-sizes"');
+    .option('--offline')
+    .action(async (mode?: string, offline: boolean = false) => {
+        if (offline) {
+            process.env.SQLX_OFFLINE = 'true';
         }
-        await testkit(mode, 600);
+        mode = mode || 'fast';
+        await testkit(mode, 6000);
+
+        if (offline) {
+            delete process.env.SQLX_OFFLINE;
+        }
     });

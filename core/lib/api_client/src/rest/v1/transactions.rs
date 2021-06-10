@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 // Workspace uses
 use zksync_types::{
-    tx::{EthSignData, TxEthSignature, TxHash},
-    BlockNumber, SignedZkSyncTx, ZkSyncTx,
+    tx::{EthBatchSignatures, EthSignData, TxEthSignatureVariant, TxHash},
+    Address, BatchFee, BlockNumber, Fee, SignedZkSyncTx, TokenLike, TxFeeTypes, ZkSyncTx,
 };
 
 // Local uses
@@ -43,14 +43,30 @@ pub struct TxData {
 #[serde(rename_all = "camelCase")]
 pub struct IncomingTx {
     pub tx: ZkSyncTx,
-    pub signature: Option<TxEthSignature>,
+    pub signature: TxEthSignatureVariant,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IncomingTxForFee {
+    pub tx_type: TxFeeTypes,
+    pub address: Address,
+    pub token_like: TokenLike,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IncomingTxBatchForFee {
+    pub tx_types: Vec<TxFeeTypes>,
+    pub addresses: Vec<Address>,
+    pub token_like: TokenLike,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct IncomingTxBatch {
     pub txs: Vec<ZkSyncTx>,
-    pub signature: Option<TxEthSignature>,
+    pub signature: EthBatchSignatures,
 }
 
 /// Transaction (or priority operation) receipt.
@@ -94,7 +110,7 @@ impl Client {
     pub async fn submit_tx(
         &self,
         tx: ZkSyncTx,
-        signature: Option<TxEthSignature>,
+        signature: TxEthSignatureVariant,
         fast_processing: Option<bool>,
     ) -> Result<TxHash, ClientError> {
         self.post("transactions/submit")
@@ -104,11 +120,45 @@ impl Client {
             .await
     }
 
+    /// Get fee for single transaction.
+    pub async fn get_txs_fee(
+        &self,
+        tx_type: TxFeeTypes,
+        address: Address,
+        token_like: TokenLike,
+    ) -> Result<Fee, ClientError> {
+        self.post("transactions/fee")
+            .body(&IncomingTxForFee {
+                tx_type,
+                address,
+                token_like,
+            })
+            .send()
+            .await
+    }
+
+    /// Get txs fee for batch.
+    pub async fn get_batched_txs_fee(
+        &self,
+        tx_types: Vec<TxFeeTypes>,
+        addresses: Vec<Address>,
+        token_like: TokenLike,
+    ) -> Result<BatchFee, ClientError> {
+        self.post("transactions/fee/batch")
+            .body(&IncomingTxBatchForFee {
+                tx_types,
+                addresses,
+                token_like,
+            })
+            .send()
+            .await
+    }
+
     /// Sends a new transactions batch to the memory pool.
     pub async fn submit_tx_batch(
         &self,
         txs: Vec<ZkSyncTx>,
-        signature: Option<TxEthSignature>,
+        signature: EthBatchSignatures,
     ) -> Result<Vec<TxHash>, ClientError> {
         self.post("transactions/submit/batch")
             .body(&IncomingTxBatch { txs, signature })
@@ -150,7 +200,7 @@ impl Client {
         &self,
         tx_hash: TxHash,
         from: Pagination,
-        limit: BlockNumber,
+        limit: u32,
     ) -> Result<Vec<Receipt>, ClientError> {
         self.get(&format!("transactions/{}/receipts", tx_hash.to_string()))
             .query(&from.into_query(limit))

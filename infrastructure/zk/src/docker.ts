@@ -10,10 +10,11 @@ const IMAGES = [
     'dev-ticker',
     'keybase',
     'ci',
-    'fee-seller',
     'exit-tool',
     'dev-liquidity-token-watcher',
-    'ci-integration-test'
+    'ci-integration-test',
+    'zk-environment',
+    'event-listener'
 ];
 
 async function dockerCommand(command: 'push' | 'build', image: string) {
@@ -41,17 +42,18 @@ async function _build(image: string) {
     }
     if (image == 'server' || image == 'prover') {
         await contract.build();
-        await contract.buildDev();
     }
     const { stdout: imageTag } = await utils.exec('git rev-parse --short HEAD');
-    const latestImage = `-t matterlabs/${image}:latest`;
+    // TODO Uncomment this code, after nft deploying
+    // const latestImage = `-t matterlabs/${image}:latest`;
     const taggedImage = ['nginx', 'server', 'prover'].includes(image) ? `-t matterlabs/${image}:${imageTag}` : '';
-    await utils.spawn(`DOCKER_BUILDKIT=1 docker build ${latestImage} ${taggedImage} -f ./docker/${image}/Dockerfile .`);
+    await utils.spawn(`DOCKER_BUILDKIT=1 docker build  ${taggedImage} -f ./docker/${image}/Dockerfile .`);
 }
 
 async function _push(image: string) {
-    await utils.spawn(`docker push matterlabs/${image}:latest`);
-    if (['nginx', 'server', 'prover'].includes(image)) {
+    // TODO Uncomment this code, after nft deploying
+    // await utils.spawn(`docker push matterlabs/${image}:latest`);
+    if (['nginx', 'server', 'prover', 'event-listener'].includes(image)) {
         const { stdout: imageTag } = await utils.exec('git rev-parse --short HEAD');
         await utils.spawn(`docker push matterlabs/${image}:${imageTag}`);
     }
@@ -66,7 +68,17 @@ export async function push(image: string) {
     await dockerCommand('push', image);
 }
 
+export async function restart(container: string) {
+    await utils.spawn(`docker-compose restart ${container}`);
+}
+
+export async function pull() {
+    await utils.spawn('docker-compose pull');
+}
+
 export const command = new Command('docker').description('docker management');
 
 command.command('build <image>').description('build docker image').action(build);
 command.command('push <image>').description('build and push docker image').action(push);
+command.command('pull').description('pull all containers').action(pull);
+command.command('restart <container>').description('restart container in docker-compose.yml').action(restart);

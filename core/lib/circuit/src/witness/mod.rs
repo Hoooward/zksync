@@ -11,10 +11,13 @@ pub use self::{
     deposit::DepositWitness,
     forced_exit::ForcedExitWitness,
     full_exit::FullExitWitness,
+    mint_nft::MintNFTWitness,
+    swap::SwapWitness,
     transfer::TransferWitness,
     transfer_to_new::TransferToNewWitness,
     utils::{SigDataInput, WitnessBuilder},
     withdraw::WithdrawWitness,
+    withdraw_nft::WithdrawNFTWitness,
 };
 
 pub mod change_pubkey_offchain;
@@ -22,10 +25,13 @@ pub mod close_account;
 pub mod deposit;
 pub mod forced_exit;
 pub mod full_exit;
+pub mod mint_nft;
 pub mod noop;
+pub mod swap;
 pub mod transfer;
 pub mod transfer_to_new;
 pub mod withdraw;
+pub mod withdraw_nft;
 
 pub mod utils;
 
@@ -45,6 +51,9 @@ pub trait Witness {
 
     /// Obtains the pubdata from the witness.
     fn get_pubdata(&self) -> Vec<bool>;
+
+    /// Obtains offset commitment data from the witness.
+    fn get_offset_commitment_data(&self) -> Vec<bool>;
 
     /// Calculates the list of Circuit operations from the witness data.
     fn calculate_operations(&self, input: Self::CalculateOpsInput) -> Vec<Operation<Bn256>>;

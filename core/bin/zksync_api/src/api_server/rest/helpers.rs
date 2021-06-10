@@ -4,7 +4,7 @@ use crate::core_api_client::EthBlockId;
 use actix_web::{HttpResponse, Result as ActixResult};
 use std::collections::HashMap;
 use zksync_storage::chain::{
-    block::records::BlockDetails,
+    block::records::StorageBlockDetails,
     operations_ext::records::{TransactionsHistoryItem, TxByHashResponse},
 };
 use zksync_storage::StorageProcessor;
@@ -13,7 +13,7 @@ use zksync_types::{PriorityOp, Token, TokenId, ZkSyncPriorityOp};
 /// Checks if block is finalized, meaning that
 /// both Verify operation is performed for it, and this
 /// operation is anchored on the Ethereum blockchain.
-pub fn block_verified(block: &BlockDetails) -> bool {
+pub fn block_verified(block: &StorageBlockDetails) -> bool {
     // We assume that it's not possible to have block that is
     // verified and not committed.
     block.verified_at.is_some() && block.verify_tx_hash.is_some()
@@ -61,7 +61,7 @@ pub fn deposit_op_to_tx_by_hash(
                 tx_type: "Deposit".into(),
                 from: format!("{:?}", deposit.from),
                 to: format!("{:?}", deposit.to),
-                token: deposit.token as i32,
+                token: *deposit.token as i32,
                 amount: deposit.amount.to_string(),
                 fee: None,
                 block_number: -1,
@@ -147,7 +147,7 @@ pub async fn parse_tx_id(
 
         let next_block_id = last_block_id + 1;
 
-        return Ok((next_block_id as u64, 0));
+        return Ok((*next_block_id as u64, 0));
     }
 
     let parts: Vec<u64> = data

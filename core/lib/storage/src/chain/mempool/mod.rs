@@ -6,7 +6,7 @@ use itertools::Itertools;
 use zksync_types::{
     mempool::SignedTxVariant,
     tx::{TxEthSignature, TxHash},
-    SignedZkSyncTx,
+    BlockNumber, SignedZkSyncTx,
 };
 // Local imports
 use self::records::MempoolTx;
@@ -42,7 +42,7 @@ impl<'a, 'c> MempoolSchema<'a, 'c> {
                 0 => None,
                 _ => Some(batch_id),
             }
-        };
+        }
 
         let mut prev_batch_id = txs.first().and_then(|tx| batch_id_optional(tx.batch_id));
 
@@ -74,7 +74,7 @@ impl<'a, 'c> MempoolSchema<'a, 'c> {
                 Some(batch_id) => {
                     // Group of batched transactions.
                     // Signatures will be loaded afterwards.
-                    let variant = SignedTxVariant::batch(deserialized_txs, batch_id, None);
+                    let variant = SignedTxVariant::batch(deserialized_txs, batch_id, vec![]);
                     txs.push(variant);
                 }
                 None => {
@@ -91,19 +91,21 @@ impl<'a, 'c> MempoolSchema<'a, 'c> {
         // Load signatures for batches.
         for tx in &mut txs {
             if let SignedTxVariant::Batch(batch) = tx {
-                let eth_signature = sqlx::query!(
+                let eth_signatures: Vec<TxEthSignature> = sqlx::query!(
                     "SELECT eth_signature FROM txs_batches_signatures
                     WHERE batch_id = $1",
                     batch.batch_id
                 )
-                .fetch_optional(self.0.conn())
+                .fetch_all(self.0.conn())
                 .await?
+                .into_iter()
                 .map(|value| {
                     serde_json::from_value(value.eth_signature)
                         .expect("failed to decode TxEthSignature")
-                });
+                })
+                .collect();
 
-                batch.eth_signature = eth_signature;
+                batch.eth_signatures = eth_signatures;
             }
         }
 
@@ -128,7 +130,7 @@ impl<'a, 'c> MempoolSchema<'a, 'c> {
     pub async fn insert_batch(
         &mut self,
         txs: &[SignedZkSyncTx],
-        eth_signature: Option<TxEthSignature>,
+        eth_signatures: Vec<TxEthSignature>,
     ) -> QueryResult<i64> {
         let start = Instant::now();
         if txs.is_empty() {
@@ -205,8 +207,8 @@ impl<'a, 'c> MempoolSchema<'a, 'c> {
         .execute(self.0.conn())
         .await?;
 
-        // If there's a signature for the whole batch, store it too.
-        if let Some(signature) = eth_signature {
+        // If there're signatures for the whole batch, store them too.
+        for signature in eth_signatures {
             let signature = serde_json::to_value(signature)?;
             sqlx::query!(
                 "INSERT INTO txs_batches_signatures VALUES($1, $2)",
@@ -371,6 +373,42 @@ impl<'a, 'c> MempoolSchema<'a, 'c> {
         self.remove_txs(&tx_hashes_to_remove).await?;
 
         metrics::histogram!("sql.chain.mempool.collect_garbage", start.elapsed());
+        Ok(())
+    }
+
+    // Returns executed txs back to mempool for blocks with number greater than `last_block`
+    pub async fn return_executed_txs_to_mempool(
+        &mut self,
+        last_block: BlockNumber,
+    ) -> QueryResult<()> {
+        let start = Instant::now();
+        let mut transaction = self.0.start_transaction().await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO mempool_txs (tx_hash, tx, created_at, eth_sign_data, batch_id)
+            SELECT tx_hash, tx, created_at, eth_sign_data, COALESCE(batch_id, 0) FROM executed_transactions
+            WHERE block_number > $1
+        "#,
+            *last_block as i64
+        )
+        .execute(transaction.conn())
+        .await?;
+
+        sqlx::query!(
+            r#"
+            DELETE FROM executed_transactions
+            WHERE block_number > $1
+        "#,
+            *last_block as i64
+        )
+        .execute(transaction.conn())
+        .await?;
+        transaction.commit().await?;
+
+        metrics::histogram!(
+            "sql.chain.mempool.return_executed_txs_to_mempool",
+            start.elapsed()
+        );
         Ok(())
     }
 }

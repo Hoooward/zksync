@@ -10,28 +10,29 @@ use actix_web::{
 
 // Workspace uses
 pub use zksync_api_client::rest::v1::{BlockInfo, TransactionInfo};
-use zksync_config::ZkSyncConfig;
 use zksync_crypto::{convert::FeConvert, Fr};
 use zksync_storage::{chain::block::records, ConnectionPool, QueryResult};
 use zksync_types::{tx::TxHash, BlockNumber};
 
 // Local uses
 use super::{Error as ApiError, JsonResult, Pagination, PaginationQuery};
-use crate::{api_server::helpers::try_parse_tx_hash, utils::shared_lru_cache::AsyncLruCache};
+use crate::{
+    api_server::helpers::try_parse_tx_hash, utils::block_details_cache::BlockDetailsCache,
+};
 
 /// Shared data between `api/v1/blocks` endpoints.
 #[derive(Debug, Clone)]
 struct ApiBlocksData {
     pool: ConnectionPool,
     /// Verified blocks cache.
-    verified_blocks: AsyncLruCache<BlockNumber, records::BlockDetails>,
+    verified_blocks: BlockDetailsCache,
 }
 
 impl ApiBlocksData {
-    fn new(pool: ConnectionPool, capacity: usize) -> Self {
+    fn new(pool: ConnectionPool, verified_blocks: BlockDetailsCache) -> Self {
         Self {
             pool,
-            verified_blocks: AsyncLruCache::new(capacity),
+            verified_blocks,
         }
     }
 
@@ -41,28 +42,8 @@ impl ApiBlocksData {
     async fn block_info(
         &self,
         block_number: BlockNumber,
-    ) -> QueryResult<Option<records::BlockDetails>> {
-        if let Some(block) = self.verified_blocks.get(&block_number).await {
-            return Ok(Some(block));
-        }
-
-        let blocks = self.blocks_range(Some(block_number), 1).await?;
-        if let Some(block) = blocks.into_iter().next() {
-            // Check if this is exactly the requested block.
-            if block.block_number != block_number as i64 {
-                return Ok(None);
-            }
-
-            // It makes sense to store in cache only fully verified blocks.
-            if block.is_verified() {
-                self.verified_blocks
-                    .insert(block_number, block.clone())
-                    .await;
-            }
-            Ok(Some(block))
-        } else {
-            Ok(None)
-        }
+    ) -> QueryResult<Option<records::StorageBlockDetails>> {
+        self.verified_blocks.get(&self.pool, block_number).await
     }
 
     /// Returns the block range up to the given block number.
@@ -71,9 +52,9 @@ impl ApiBlocksData {
     async fn blocks_range(
         &self,
         max_block: Option<BlockNumber>,
-        limit: BlockNumber,
-    ) -> QueryResult<Vec<records::BlockDetails>> {
-        let max_block = max_block.unwrap_or(BlockNumber::MAX);
+        limit: u32,
+    ) -> QueryResult<Vec<records::StorageBlockDetails>> {
+        let max_block = max_block.unwrap_or(BlockNumber(u32::MAX));
 
         let mut storage = self.pool.access_storage().await?;
         storage
@@ -102,9 +83,9 @@ pub(super) mod convert {
 
     use super::*;
 
-    pub fn block_info_from_details(inner: records::BlockDetails) -> BlockInfo {
+    pub fn block_info_from_details(inner: records::StorageBlockDetails) -> BlockInfo {
         BlockInfo {
-                block_number: inner.block_number as BlockNumber,
+                block_number: BlockNumber(inner.block_number as u32),
                 new_state_root: Fr::from_bytes(&inner.new_state_root).unwrap_or_else(|err| {
                     panic!(
                         "Database provided an incorrect new_state_root field: {:?}, an error occurred {}",
@@ -143,7 +124,7 @@ pub(super) mod convert {
                     inner.tx_hash, err
                 )
             }),
-            block_number: inner.block_number as BlockNumber,
+            block_number: BlockNumber(inner.block_number as u32),
             op: inner.op,
             success: inner.success,
             fail_reason: inner.fail_reason,
@@ -205,7 +186,7 @@ async fn blocks_range(
     let range = if let Pagination::After(after) = pagination {
         range
             .into_iter()
-            .filter(|block| block.block_number > after as i64)
+            .filter(|block| block.block_number > *after as i64)
             .map(convert::block_info_from_details)
             .collect()
     } else {
@@ -218,8 +199,8 @@ async fn blocks_range(
     Ok(Json(range))
 }
 
-pub fn api_scope(config: &ZkSyncConfig, pool: ConnectionPool) -> Scope {
-    let data = ApiBlocksData::new(pool, config.api.common.caches_size);
+pub fn api_scope(pool: ConnectionPool, cache: BlockDetailsCache) -> Scope {
+    let data = ApiBlocksData::new(pool, cache);
 
     web::scope("blocks")
         .data(data)
@@ -241,7 +222,8 @@ mod tests {
         let cfg = TestServerConfig::default();
         cfg.fill_database().await?;
 
-        let (client, server) = cfg.start_server(|cfg| api_scope(&cfg.config, cfg.pool.clone()));
+        let (client, server) =
+            cfg.start_server(|cfg| api_scope(cfg.pool.clone(), BlockDetailsCache::new(10)));
 
         // Block requests part
         let blocks: Vec<BlockInfo> = {
@@ -250,7 +232,7 @@ mod tests {
             let blocks = storage
                 .chain()
                 .block_schema()
-                .load_block_range(10, 10)
+                .load_block_range(BlockNumber(10), 10)
                 .await?;
 
             blocks
@@ -259,14 +241,21 @@ mod tests {
                 .collect()
         };
 
-        assert_eq!(client.block_by_id(1).await?.unwrap(), blocks[7]);
+        assert_eq!(
+            client.block_by_id(BlockNumber(1)).await?.unwrap(),
+            blocks[7]
+        );
         assert_eq!(client.blocks_range(Pagination::Last, 10).await?, blocks);
         assert_eq!(
-            client.blocks_range(Pagination::Before(2), 5).await?,
+            client
+                .blocks_range(Pagination::Before(BlockNumber(2)), 5)
+                .await?,
             &blocks[7..8]
         );
         assert_eq!(
-            client.blocks_range(Pagination::After(7), 5).await?,
+            client
+                .blocks_range(Pagination::After(BlockNumber(7)), 5)
+                .await?,
             &blocks[0..1]
         );
 
@@ -277,7 +266,7 @@ mod tests {
             let transactions = storage
                 .chain()
                 .block_schema()
-                .get_block_transactions(1)
+                .get_block_transactions(BlockNumber(1))
                 .await?;
 
             transactions
@@ -285,8 +274,11 @@ mod tests {
                 .map(convert::transaction_info_from_transaction_item)
                 .collect()
         };
-        assert_eq!(client.block_transactions(1).await?, expected_txs);
-        assert_eq!(client.block_transactions(6).await?, vec![]);
+        assert_eq!(
+            client.block_transactions(BlockNumber(1)).await?,
+            expected_txs
+        );
+        assert_eq!(client.block_transactions(BlockNumber(6)).await?, vec![]);
 
         server.stop().await;
         Ok(())

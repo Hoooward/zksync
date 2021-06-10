@@ -3,11 +3,12 @@ import { BigNumber, Wallet, ethers } from 'ethers';
 import { Deployer } from '../src.ts/deploy';
 import * as fs from 'fs';
 import * as path from 'path';
+import { web3Provider } from './utils';
 
 const testConfigPath = path.join(process.env.ZKSYNC_HOME as string, `etc/test_config/constant`);
 const ethTestConfig = JSON.parse(fs.readFileSync(`${testConfigPath}/eth.json`, { encoding: 'utf-8' }));
 const deployer = new Deployer({ deployWallet: ethers.Wallet.createRandom() });
-const provider = new ethers.providers.JsonRpcProvider(process.env.WEB3_URL);
+const provider = web3Provider();
 const governorWallet = Wallet.fromMnemonic(
     process.env.MNEMONIC ? process.env.MNEMONIC : ethTestConfig.mnemonic,
     "m/44'/60'/0'/0/1"
@@ -17,7 +18,7 @@ async function governanceAddToken(address: string) {
     console.log('Adding new ERC20 token to network: ', address);
 
     const tx = await deployer
-        .governanceContract(governorWallet)
+        .tokenGovernanceContract(governorWallet)
         .addToken(address, { gasLimit: BigNumber.from('1000000') });
     console.log('tx hash: ', tx.hash);
     const receipt = await tx.wait();

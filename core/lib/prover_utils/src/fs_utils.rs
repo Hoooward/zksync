@@ -5,6 +5,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use zksync_crypto::bellman::kate_commitment::{Crs, CrsForLagrangeForm, CrsForMonomialForm};
 use zksync_crypto::params::{account_tree_depth, balance_tree_depth};
+use zksync_crypto::proof::PrecomputedSampleProofs;
 use zksync_crypto::Engine;
 
 pub fn get_keys_root_dir() -> PathBuf {
@@ -56,8 +57,8 @@ pub fn get_universal_setup_monomial_form(
     );
     let setup_file_name = format!("setup_2^{}.key", power_of_two);
     let mut buf_reader = get_universal_setup_file_buff_reader(&setup_file_name)?;
-    Ok(Crs::<Engine, CrsForMonomialForm>::read(&mut buf_reader)
-        .map_err(|e| format_err!("Failed to read Crs from setup file: {}", e))?)
+    Crs::<Engine, CrsForMonomialForm>::read(&mut buf_reader)
+        .map_err(|e| format_err!("Failed to read Crs from setup file: {}", e))
 }
 
 /// Returns universal setup in lagrange form of the given power of two (range: SETUP_MIN_POW2..=SETUP_MAX_POW2). Checks if file exists
@@ -70,8 +71,8 @@ pub fn get_universal_setup_lagrange_form(
     );
     let setup_file_name = format!("setup_2^{}_lagrange.key", power_of_two);
     let mut buf_reader = get_universal_setup_file_buff_reader(&setup_file_name)?;
-    Ok(Crs::<Engine, CrsForLagrangeForm>::read(&mut buf_reader)
-        .map_err(|e| format_err!("Failed to read Crs from setup file: {}", e))?)
+    Crs::<Engine, CrsForLagrangeForm>::read(&mut buf_reader)
+        .map_err(|e| format_err!("Failed to read Crs from setup file: {}", e))
 }
 
 pub fn get_exodus_verification_key_path() -> PathBuf {
@@ -90,4 +91,22 @@ pub fn get_verifier_contract_key_path() -> PathBuf {
     let mut contract = get_keys_root_dir();
     contract.push("KeysWithPlonkVerifier.sol");
     contract
+}
+
+pub fn get_recursive_verification_key_path(number_of_proofs: usize) -> PathBuf {
+    let mut key = get_keys_root_dir();
+    key.push(&format!("recursive_{}.key", number_of_proofs));
+    key
+}
+
+pub fn get_precomputed_proofs_path() -> PathBuf {
+    let mut path = get_keys_root_dir();
+    path.push("precomputed_proofs.json");
+    path
+}
+
+pub fn load_precomputed_proofs() -> anyhow::Result<PrecomputedSampleProofs> {
+    let path = get_precomputed_proofs_path();
+    let file = File::open(path)?;
+    Ok(serde_json::from_reader(file)?)
 }

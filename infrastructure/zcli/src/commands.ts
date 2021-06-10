@@ -155,8 +155,14 @@ class TxSubmitter {
         fast: boolean = false,
         network: Network = 'localhost'
     ) {
-        const ethProvider =
-            network == 'localhost' ? new ethers.providers.JsonRpcProvider() : ethers.getDefaultProvider(network);
+        let ethProvider;
+        if (process.env.CI == '1') {
+            ethProvider = new ethers.providers.JsonRpcProvider('http://geth:8545');
+        } else if (network == 'localhost') {
+            ethProvider = new ethers.providers.JsonRpcProvider();
+        } else {
+            ethProvider = ethers.getDefaultProvider(network);
+        }
         const syncProvider = await zksync.getDefaultProvider(network, 'HTTP');
         const ethWallet = new ethers.Wallet(txDetails.privkey).connect(ethProvider);
         const syncWallet = await zksync.Wallet.fromEthSigner(ethWallet, syncProvider);
@@ -170,7 +176,8 @@ class TxSubmitter {
         const { to, token, amount } = txDetails;
         if (!(await this.syncWallet.isSigningKeySet())) {
             const changePubkey = await this.syncWallet.setSigningKey({
-                feeToken: token
+                feeToken: token,
+                ethAuthType: 'ECDSA'
             });
             await changePubkey.awaitReceipt();
         }
@@ -196,17 +203,19 @@ class TxSubmitter {
     }
 
     private async withdraw(txDetails: TxDetails, fast: boolean) {
-        const { to: ethAddress, token, amount } = txDetails;
+        const { to: ethAddress, token, amount, fastProcessing } = txDetails;
         if (!(await this.syncWallet.isSigningKeySet())) {
             const changePubkey = await this.syncWallet.setSigningKey({
-                feeToken: token
+                feeToken: token,
+                ethAuthType: 'ECDSA'
             });
             await changePubkey.awaitReceipt();
         }
         const txHandle = await this.syncWallet.withdrawFromSyncToEthereum({
             ethAddress,
             token,
-            amount: this.syncProvider.tokenSet.parseToken(token, amount)
+            amount: this.syncProvider.tokenSet.parseToken(token, amount),
+            fastProcessing
         });
         if (!fast) await txHandle.awaitReceipt();
         return txHandle.txHash;

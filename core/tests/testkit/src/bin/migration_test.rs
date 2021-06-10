@@ -4,18 +4,21 @@ use crate::zksync_account::ZkSyncAccount;
 use std::time::Instant;
 use web3::transports::Http;
 use zksync_testkit::scenarios::{perform_basic_operations, BlockProcessing};
+use zksync_testkit::zksync_account::ZkSyncETHAccountData;
 use zksync_testkit::*;
+use zksync_types::{Nonce, TokenId};
 
 async fn migration_test() {
     let testkit_config = TestkitConfig::from_env();
 
     let fee_account = ZkSyncAccount::rand();
     let (sk_thread_handle, stop_state_keeper_sender, sk_channels) =
-        spawn_state_keeper(&fee_account.address);
+        spawn_state_keeper(&fee_account.address, genesis_state(&fee_account.address));
+    let genesis_root = genesis_state(&fee_account.address).tree.root_hash();
 
     let deploy_timer = Instant::now();
     println!("deploying contracts");
-    let contracts = deploy_contracts(false, Default::default());
+    let contracts = deploy_contracts(false, genesis_root);
     println!(
         "contracts deployed {:#?}, {} secs",
         contracts,
@@ -47,15 +50,16 @@ async fn migration_test() {
         .collect::<Vec<_>>();
 
     let zksync_accounts = {
-        let mut zksync_accounts = Vec::new();
-        zksync_accounts.push(fee_account);
+        let mut zksync_accounts = vec![fee_account];
         zksync_accounts.extend(eth_accounts.iter().map(|eth_account| {
             let rng_zksync_key = ZkSyncAccount::rand().private_key;
             ZkSyncAccount::new(
                 rng_zksync_key,
-                0,
+                Nonce(0),
                 eth_account.address,
-                eth_account.private_key,
+                ZkSyncETHAccountData::EOA {
+                    eth_private_key: eth_account.private_key,
+                },
             )
         }));
         zksync_accounts
@@ -67,33 +71,38 @@ async fn migration_test() {
         fee_account_id: ZKSyncAccountId(0),
     };
 
-    let mut test_setup = TestSetup::new(sk_channels, accounts, &contracts, commit_account);
+    let mut test_setup = TestSetup::new(
+        sk_channels,
+        accounts,
+        &contracts,
+        commit_account,
+        genesis_root,
+        None,
+    );
 
     let deposit_amount = parse_ether("1.0").unwrap();
 
-    for token in 0..=1 {
-        perform_basic_operations(
-            token,
-            &mut test_setup,
-            deposit_amount.clone(),
-            BlockProcessing::CommitAndVerify,
-        )
-        .await;
-    }
+    let token = TokenId(0);
+    perform_basic_operations(
+        token,
+        &mut test_setup,
+        deposit_amount.clone(),
+        BlockProcessing::CommitAndVerify,
+    )
+    .await;
 
     let start_upgrade = Instant::now();
     run_upgrade_franklin(contracts.contract, contracts.upgrade_gatekeeper);
     println!("Upgrade done in {:?}", start_upgrade.elapsed());
 
-    for token in 0..=1 {
-        perform_basic_operations(
-            token,
-            &mut test_setup,
-            deposit_amount.clone(),
-            BlockProcessing::CommitAndVerify,
-        )
-        .await;
-    }
+    let token = TokenId(1);
+    perform_basic_operations(
+        token,
+        &mut test_setup,
+        deposit_amount.clone(),
+        BlockProcessing::CommitAndVerify,
+    )
+    .await;
 
     stop_state_keeper_sender.send(()).expect("sk stop send");
     sk_thread_handle.join().expect("sk thread join");

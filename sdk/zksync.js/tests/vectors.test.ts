@@ -10,15 +10,19 @@ import {
     packAmountChecked,
     packFeeChecked,
     TokenSet,
-    parseHexWithPrefix
+    parseHexWithPrefix,
+    getTxHash,
+    serializeTx
 } from '../src/utils';
 import { privateKeyFromSeed, signTransactionBytes } from '../src/crypto';
-import { loadTestVectorsConfig } from './helpers';
+import { loadTestVectorsConfig } from 'reading-tool';
+import { MintNFT, WithdrawNFT } from '../src/types';
 
 const vectors = loadTestVectorsConfig();
 const cryptoPrimitivesVectors = vectors['cryptoPrimitivesTest'];
 const utilsVectors = vectors['utils'];
 const txVectors = vectors['txTest'];
+const txHashVectors = vectors['txHashTest'];
 
 describe(cryptoPrimitivesVectors['description'], function () {
     it('Keys and signatures', async function () {
@@ -139,7 +143,10 @@ describe(txVectors['description'], function () {
                 expect(utils.hexlify(signBytes)).to.eql(expected.signBytes, 'Sign bytes do not match');
                 expect(signature).to.eql(expected.signature, 'Signature does not match');
                 expect(ethSignature).to.eql(expected.ethSignature, 'Ethereum signature does not match');
-                expect(ethSignMessage).to.eql(expected.ethSignMessage, 'Ethereum signature message does not match');
+                expect(utils.hexlify(utils.toUtf8Bytes(ethSignMessage))).to.eql(
+                    expected.ethSignMessage,
+                    'Ethereum signature message does not match'
+                );
             }
         }
     });
@@ -161,7 +168,10 @@ describe(txVectors['description'], function () {
                 expect(utils.hexlify(signBytes)).to.eql(expected.signBytes, 'Sign bytes do not match');
                 expect(signature).to.eql(expected.signature, 'Signature does not match');
                 expect(ethSignature).to.eql(expected.ethSignature, 'Ethereum signature does not match');
-                expect(ethSignMessage).to.eql(expected.ethSignMessage, 'Ethereum signature message does not match');
+                expect(utils.hexlify(ethSignMessage)).to.eql(
+                    expected.ethSignMessage,
+                    'Ethereum signature message does not match'
+                );
             }
         }
     });
@@ -183,7 +193,10 @@ describe(txVectors['description'], function () {
                 expect(utils.hexlify(signBytes)).to.eql(expected.signBytes, 'Sign bytes do not match');
                 expect(signature).to.eql(expected.signature, 'Signature does not match');
                 expect(ethSignature).to.eql(expected.ethSignature, 'Ethereum signature does not match');
-                expect(ethSignMessage).to.eql(expected.ethSignMessage, 'Ethereum signature message does not match');
+                expect(utils.hexlify(utils.toUtf8Bytes(ethSignMessage))).to.eql(
+                    expected.ethSignMessage,
+                    'Ethereum signature message does not match'
+                );
             }
         }
     });
@@ -202,6 +215,78 @@ describe(txVectors['description'], function () {
                 expect(utils.hexlify(signBytes)).to.eql(expected.signBytes, 'Sign bytes do not match');
                 expect(signature).to.eql(expected.signature, 'Signature does not match');
             }
+        }
+    });
+
+    it('MintNFT signature', async function () {
+        for (const item of txVectors.items) {
+            const { type: txType, ethPrivateKey, data: mintNFTData, ethSignData } = item.inputs;
+            const expected = item.outputs;
+            const privateKey = parseHexWithPrefix(ethPrivateKey);
+            const { signer, ethMessageSigner } = await getSigner(privateKey);
+
+            if (txType === 'MintNFT') {
+                const tx: MintNFT = {
+                    ...mintNFTData,
+                    type: 'MintNFT',
+                    feeToken: mintNFTData.feeTokenId
+                };
+                const signBytes = serializeTx(tx);
+                const { signature } = await signer.signMintNFT(mintNFTData);
+
+                const { signature: ethSignature } = await ethMessageSigner.ethSignMintNFT(ethSignData);
+                const ethSignMessage = ethMessageSigner.getMintNFTEthSignMessage(ethSignData);
+
+                expect(utils.hexlify(signBytes)).to.eql(expected.signBytes, 'Sign bytes do not match');
+                expect(signature).to.eql(expected.signature, 'Signature does not match');
+                expect(ethSignature).to.eql(expected.ethSignature, 'Ethereum signature does not match');
+                expect(utils.hexlify(utils.toUtf8Bytes(ethSignMessage))).to.eql(
+                    expected.ethSignMessage,
+                    'Ethereum signature message does not match'
+                );
+            }
+        }
+    });
+
+    it('WithdrawNFT signature', async function () {
+        for (const item of txVectors.items) {
+            const { type: txType, ethPrivateKey, data: withdrawNFTData, ethSignData } = item.inputs;
+            const expected = item.outputs;
+            const privateKey = parseHexWithPrefix(ethPrivateKey);
+            const { signer, ethMessageSigner } = await getSigner(privateKey);
+
+            if (txType === 'WithdrawNFT') {
+                const tx: WithdrawNFT = {
+                    ...withdrawNFTData,
+                    type: 'WithdrawNFT',
+                    token: withdrawNFTData.tokenId,
+                    feeToken: withdrawNFTData.feeTokenId
+                };
+                const signBytes = serializeTx(tx);
+                const { signature } = await signer.signWithdrawNFT(withdrawNFTData);
+
+                const { signature: ethSignature } = await ethMessageSigner.ethSignWithdrawNFT(ethSignData);
+                const ethSignMessage = ethMessageSigner.getWithdrawNFTEthSignMessage(ethSignData);
+
+                expect(utils.hexlify(signBytes)).to.eql(expected.signBytes, 'Sign bytes do not match');
+                expect(signature).to.eql(expected.signature, 'Signature does not match');
+                expect(ethSignature).to.eql(expected.ethSignature, 'Ethereum signature does not match');
+                expect(utils.hexlify(utils.toUtf8Bytes(ethSignMessage))).to.eql(
+                    expected.ethSignMessage,
+                    'Ethereum signature message does not match'
+                );
+            }
+        }
+    });
+});
+
+describe(txHashVectors['description'], function () {
+    it('Transaction hash', async function () {
+        for (const item of txHashVectors.items) {
+            const tx = item.inputs.tx;
+            const expectedHash = item.outputs.hash;
+            const hash = getTxHash(tx);
+            expect(hash).to.eql(expectedHash, 'Hash does not match');
         }
     });
 });

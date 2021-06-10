@@ -4,7 +4,7 @@ use zksync_crypto::rand::{Rng, SeedableRng, XorShiftRng};
 use zksync_types::{
     mempool::SignedTxVariant,
     tx::{ChangePubKey, Transfer, Withdraw},
-    Address, SignedZkSyncTx, ZkSyncTx,
+    AccountId, Address, BlockNumber, Nonce, SignedZkSyncTx, TokenId, ZkSyncTx,
 };
 // Local imports
 use crate::test_data::gen_eth_sign_data;
@@ -17,48 +17,52 @@ use crate::{
     QueryResult, StorageProcessor,
 };
 
-/// Generates several different `SignedFranlinTx` objects.
+/// Generates several different `SignedZkSyncTx` objects.
 fn franklin_txs() -> Vec<SignedZkSyncTx> {
     let transfer_1 = Transfer::new(
-        42,
+        AccountId(42),
         Address::random(),
         Address::random(),
-        0,
+        TokenId(0),
         100u32.into(),
         10u32.into(),
-        10,
+        Nonce(10),
+        Default::default(),
         None,
     );
 
     let transfer_2 = Transfer::new(
-        4242,
+        AccountId(4242),
         Address::random(),
         Address::random(),
-        0,
+        TokenId(0),
         500u32.into(),
         20u32.into(),
-        11,
+        Nonce(11),
+        Default::default(),
         None,
     );
 
     let withdraw = Withdraw::new(
-        33,
+        AccountId(33),
         Address::random(),
         Address::random(),
-        0,
+        TokenId(0),
         100u32.into(),
         10u32.into(),
-        12,
+        Nonce(12),
+        Default::default(),
         None,
     );
 
     let change_pubkey = ChangePubKey::new(
-        123,
+        AccountId(123),
         Address::random(),
         Default::default(),
-        0,
+        TokenId(0),
         Default::default(),
-        13,
+        Nonce(13),
+        Default::default(),
         None,
         None,
     );
@@ -91,13 +95,14 @@ fn gen_transfers(n: usize) -> Vec<SignedZkSyncTx> {
     (0..n)
         .map(|id| {
             let transfer = Transfer::new(
-                id as u32,
+                AccountId(id as u32),
                 Address::random(),
                 Address::random(),
-                0,
+                TokenId(0),
                 100u32.into(),
                 10u32.into(),
-                10,
+                Nonce(10),
+                Default::default(),
                 None,
             );
 
@@ -161,7 +166,9 @@ async fn store_load_batch(mut storage: StorageProcessor<'_>) -> QueryResult<()> 
     let alone_txs_2 = &txs[6..8];
     let batch_3 = &txs[8..10];
 
-    let batch_1_signature = Some(gen_eth_sign_data("test message".to_owned()).signature);
+    let signature = gen_eth_sign_data("test message".to_owned()).signature;
+    let batch_1_signature = vec![signature.clone()];
+    let batch_2_signatures = vec![signature.clone(), signature];
 
     let elements_count = alone_txs_1.len() + alone_txs_2.len() + 3; // Amount of alone txs + amount of batches.
 
@@ -173,9 +180,9 @@ async fn store_load_batch(mut storage: StorageProcessor<'_>) -> QueryResult<()> 
     MempoolSchema(&mut storage)
         .insert_batch(batch_1, batch_1_signature.clone())
         .await?;
-
+    // Store the second one with multiple signatures.
     MempoolSchema(&mut storage)
-        .insert_batch(batch_2, None)
+        .insert_batch(batch_2, batch_2_signatures.clone())
         .await?;
 
     for tx in alone_txs_2 {
@@ -183,7 +190,7 @@ async fn store_load_batch(mut storage: StorageProcessor<'_>) -> QueryResult<()> 
     }
 
     MempoolSchema(&mut storage)
-        .insert_batch(batch_3, None)
+        .insert_batch(batch_3, vec![])
         .await?;
 
     // Load the txs and check that they match the expected list.
@@ -192,12 +199,15 @@ async fn store_load_batch(mut storage: StorageProcessor<'_>) -> QueryResult<()> 
 
     assert!(matches!(txs_from_db[0], SignedTxVariant::Tx(_)));
     assert!(matches!(txs_from_db[1], SignedTxVariant::Tx(_)));
-    // Try to load the batch with the signature.
+    // Try to load the batches with the signature.
     match &txs_from_db[2] {
-        SignedTxVariant::Batch(batch) => assert_eq!(batch.eth_signature, batch_1_signature),
+        SignedTxVariant::Batch(batch) => assert_eq!(batch.eth_signatures, batch_1_signature),
         SignedTxVariant::Tx(_) => panic!("expected to load batch of transactions"),
     };
-    assert!(matches!(txs_from_db[3], SignedTxVariant::Batch(_)));
+    match &txs_from_db[3] {
+        SignedTxVariant::Batch(batch) => assert_eq!(batch.eth_signatures, batch_2_signatures),
+        SignedTxVariant::Tx(_) => panic!("expected to load batch of transactions"),
+    };
     assert!(matches!(txs_from_db[4], SignedTxVariant::Tx(_)));
     assert!(matches!(txs_from_db[5], SignedTxVariant::Tx(_)));
     assert!(matches!(txs_from_db[6], SignedTxVariant::Batch(_)));
@@ -308,7 +318,8 @@ async fn contains_and_get_tx(mut storage: StorageProcessor<'_>) -> QueryResult<(
         let single_tx = &txs[0];
 
         let batch = &txs[1..];
-        let batch_signature = Some(gen_eth_sign_data("test message".to_owned()).signature);
+        let batch_signature =
+            vec![gen_eth_sign_data("test message".to_owned()).signature; txs.len() - 1];
 
         let mut mempool = MempoolSchema(&mut storage);
         mempool.insert_tx(single_tx).await?;
@@ -332,6 +343,59 @@ async fn contains_and_get_tx(mut storage: StorageProcessor<'_>) -> QueryResult<(
                 .hash(),
             tx_hash,
         );
+    }
+
+    Ok(())
+}
+
+/// Checks that returning executed txs to mempool works correctly.
+#[db_test]
+async fn test_return_executed_txs_to_mempool(mut storage: StorageProcessor<'_>) -> QueryResult<()> {
+    let txs = gen_transfers(5);
+
+    // Insert 5 executed transactions.
+    for block_number in 1..=5 {
+        let tx_data = txs.get(block_number - 1).unwrap();
+        let executed_tx = NewExecutedTransaction {
+            block_number: block_number as i64,
+            tx_hash: tx_data.hash().as_ref().to_vec(),
+            tx: serde_json::to_value(&tx_data.tx).unwrap(),
+            operation: Default::default(),
+            from_account: Default::default(),
+            to_account: None,
+            success: true,
+            fail_reason: None,
+            block_index: None,
+            primary_account_address: Default::default(),
+            nonce: Default::default(),
+            created_at: chrono::Utc::now(),
+            eth_sign_data: None,
+            batch_id: None,
+        };
+
+        OperationsSchema(&mut storage)
+            .store_executed_tx(executed_tx)
+            .await?;
+    }
+
+    // Return txs with block numbers greater than 3 back to mempool.
+    MempoolSchema(&mut storage)
+        .return_executed_txs_to_mempool(BlockNumber(3))
+        .await?;
+
+    // Check that the first 3 txs are executed and 2 last are in mempool.
+    assert_eq!(MempoolSchema(&mut storage).load_txs().await?.len(), 2);
+    for block_number in 1..=5 {
+        let tx_hash = txs.get(block_number - 1).unwrap().hash();
+        let tx_in_executed = OperationsSchema(&mut storage)
+            .get_executed_operation(tx_hash.as_ref())
+            .await?
+            .is_some();
+        if block_number <= 3 {
+            assert!(tx_in_executed);
+        } else {
+            assert!(!tx_in_executed);
+        }
     }
 
     Ok(())

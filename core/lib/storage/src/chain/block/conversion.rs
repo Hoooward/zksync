@@ -14,6 +14,7 @@ use zksync_types::{
     },
 };
 // Local imports
+use crate::chain::operations::records::StoredAggregatedOperation;
 use crate::{
     chain::{
         block::BlockSchema,
@@ -23,17 +24,18 @@ use crate::{
         },
     },
     prover::ProverSchema,
-    QueryResult, StorageProcessor,
+    QueryResult, StorageActionType, StorageProcessor,
 };
+use zksync_types::aggregated_operations::AggregatedOperation;
 
 impl StoredOperation {
     pub async fn into_op(self, conn: &mut StorageProcessor<'_>) -> QueryResult<Operation> {
-        let block_number = self.block_number as BlockNumber;
+        let block_number = BlockNumber(self.block_number as u32);
         let id = Some(self.id);
 
-        let action = if self.action_type == ActionType::COMMIT.to_string() {
+        let action = if self.action_type == StorageActionType::from(ActionType::COMMIT) {
             Action::Commit
-        } else if self.action_type == ActionType::VERIFY.to_string() {
+        } else if self.action_type == StorageActionType::from(ActionType::VERIFY) {
             let proof = Box::new(ProverSchema(conn).load_proof(block_number).await?);
             Action::Verify {
                 proof: proof.expect("No proof for verify action").into(),
@@ -114,7 +116,7 @@ impl NewExecutedPriorityOperation {
         };
 
         Self {
-            block_number: i64::from(block),
+            block_number: i64::from(*block),
             block_index: exec_prior_op.block_index as i32,
             operation,
             from_account: from_account.as_ref().to_vec(),
@@ -145,7 +147,7 @@ impl NewExecutedTransaction {
 
         let (from_account_hex, to_account_hex): (String, Option<String>) =
             match exec_tx.signed_tx.tx {
-                ZkSyncTx::Withdraw(_) | ZkSyncTx::Transfer(_) => (
+                ZkSyncTx::Withdraw(_) | ZkSyncTx::Transfer(_) | ZkSyncTx::WithdrawNFT(_) => (
                     serde_json::from_value(tx["from"].clone()).unwrap(),
                     serde_json::from_value(tx["to"].clone()).unwrap(),
                 ),
@@ -161,6 +163,14 @@ impl NewExecutedTransaction {
                     serde_json::from_value(tx["target"].clone()).unwrap(),
                     serde_json::from_value(tx["target"].clone()).unwrap(),
                 ),
+                ZkSyncTx::MintNFT(_) => (
+                    serde_json::from_value(tx["creatorAddress"].clone()).unwrap(),
+                    serde_json::from_value(tx["recipientAddress"].clone()).unwrap(),
+                ),
+                ZkSyncTx::Swap(_) => (
+                    serde_json::from_value(tx["submitterAddress"].clone()).unwrap(),
+                    serde_json::from_value(tx["submitterAddress"].clone()).unwrap(),
+                ),
             };
 
         let from_account: Vec<u8> = hex::decode(cut_prefix(&from_account_hex)).unwrap();
@@ -172,7 +182,7 @@ impl NewExecutedTransaction {
         });
 
         Self {
-            block_number: i64::from(block),
+            block_number: i64::from(*block),
             tx_hash: exec_tx.signed_tx.hash().as_ref().to_vec(),
             from_account,
             to_account,
@@ -182,10 +192,20 @@ impl NewExecutedTransaction {
             fail_reason: exec_tx.fail_reason,
             block_index: exec_tx.block_index.map(|idx| idx as i32),
             primary_account_address: exec_tx.signed_tx.account().as_bytes().to_vec(),
-            nonce: exec_tx.signed_tx.nonce() as i64,
+            nonce: *exec_tx.signed_tx.nonce() as i64,
             created_at: exec_tx.created_at,
             eth_sign_data,
             batch_id: exec_tx.batch_id,
         }
+    }
+}
+
+impl StoredAggregatedOperation {
+    pub fn into_aggregated_op(self) -> (i64, AggregatedOperation) {
+        (
+            self.id,
+            serde_json::from_value(self.arguments)
+                .expect("Incorrect serialized aggregated operation in storage"),
+        )
     }
 }

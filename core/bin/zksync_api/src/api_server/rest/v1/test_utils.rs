@@ -1,7 +1,6 @@
 //! API testing helpers.
 
 // Built-in uses
-use std::str::FromStr;
 
 // External uses
 use actix_web::{web, App, Scope};
@@ -14,33 +13,42 @@ use zksync_config::ZkSyncConfig;
 use zksync_crypto::rand::{SeedableRng, XorShiftRng};
 use zksync_storage::{
     chain::operations::records::NewExecutedPriorityOperation,
+    chain::operations::OperationsSchema,
+    prover::ProverSchema,
     test_data::{
-        dummy_ethereum_tx_hash, gen_acc_random_updates, gen_unique_operation,
-        gen_unique_operation_with_txs, BLOCK_SIZE_CHUNKS,
+        dummy_ethereum_tx_hash, gen_acc_random_updates, gen_sample_block,
+        gen_unique_aggregated_operation_with_txs, get_sample_aggregated_proof,
+        get_sample_single_proof, BLOCK_SIZE_CHUNKS,
     },
     ConnectionPool,
 };
 use zksync_test_account::ZkSyncAccount;
 use zksync_types::{
-    ethereum::OperationType,
+    aggregated_operations::AggregatedActionType,
     helpers::{apply_updates, closest_packable_fee_amount, closest_packable_token_amount},
     operations::{ChangePubKeyOp, TransferToNewOp},
-    AccountId, AccountMap, Action, Address, BlockNumber, Deposit, DepositOp, ExecutedOperations,
-    ExecutedPriorityOp, ExecutedTx, FullExit, FullExitOp, PriorityOp, Token, Transfer, TransferOp,
-    ZkSyncOp, ZkSyncTx, H256,
+    prover::ProverJobType,
+    tx::ChangePubKeyType,
+    AccountId, AccountMap, Address, BlockNumber, Deposit, DepositOp, ExecutedOperations,
+    ExecutedPriorityOp, ExecutedTx, FullExit, FullExitOp, MintNFTOp, Nonce, PriorityOp, Token,
+    TokenId, Transfer, TransferOp, ZkSyncOp, ZkSyncTx, H256,
 };
 
 // Local uses
 use super::Client;
+use std::str::FromStr;
+use zksync_storage::test_data::generate_nft;
 
 /// Serial ID of the verified priority operation.
 pub const VERIFIED_OP_SERIAL_ID: u64 = 10;
 /// Serial ID of the committed priority operation.
 pub const COMMITTED_OP_SERIAL_ID: u64 = 243;
 /// Number of committed blocks.
-pub const COMMITTED_BLOCKS_COUNT: BlockNumber = 8;
+pub const COMMITTED_BLOCKS_COUNT: u32 = 8;
 /// Number of verified blocks.
-pub const VERIFIED_BLOCKS_COUNT: BlockNumber = 3;
+pub const VERIFIED_BLOCKS_COUNT: u32 = 5;
+/// Number of executed blocks.
+pub const EXECUTED_BLOCKS_COUNT: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct TestServerConfig {
@@ -64,13 +72,17 @@ pub struct TestTransactions {
 }
 
 impl TestServerConfig {
-    pub fn start_server<F>(&self, scope_factory: F) -> (Client, actix_web::test::TestServer)
+    pub fn start_server_with_scope<F>(
+        &self,
+        scope: String,
+        scope_factory: F,
+    ) -> (Client, actix_web::test::TestServer)
     where
         F: Fn(&TestServerConfig) -> Scope + Clone + Send + 'static,
     {
         let this = self.clone();
         let server = actix_web::test::start(move || {
-            App::new().service(web::scope("/api/v1").service(scope_factory(&this)))
+            App::new().service(web::scope(scope.as_ref()).service(scope_factory(&this)))
         });
 
         let url = server.url("").trim_end_matches('/').to_owned();
@@ -79,9 +91,16 @@ impl TestServerConfig {
         (client, server)
     }
 
+    pub fn start_server<F>(&self, scope_factory: F) -> (Client, actix_web::test::TestServer)
+    where
+        F: Fn(&TestServerConfig) -> Scope + Clone + Send + 'static,
+    {
+        self.start_server_with_scope(String::from("/api/v1"), scope_factory)
+    }
+
     /// Creates several transactions and the corresponding executed operations.
     pub fn gen_zk_txs(fee: u64) -> TestTransactions {
-        Self::gen_zk_txs_for_account(0xdead, ZkSyncAccount::rand().address, fee)
+        Self::gen_zk_txs_for_account(AccountId(0xdead), ZkSyncAccount::rand().address, fee)
     }
 
     /// Creates several transactions and the corresponding executed operations for the
@@ -92,7 +111,7 @@ impl TestServerConfig {
         fee: u64,
     ) -> TestTransactions {
         let from = ZkSyncAccount::rand();
-        from.set_account_id(Some(0xf00d));
+        from.set_account_id(Some(AccountId(0xf00d)));
 
         let mut to = ZkSyncAccount::rand();
         to.set_account_id(Some(account_id));
@@ -102,7 +121,14 @@ impl TestServerConfig {
 
         // Sign change pubkey tx pair
         {
-            let tx = from.sign_change_pubkey_tx(None, false, 0, fee.into(), false);
+            let tx = from.sign_change_pubkey_tx(
+                None,
+                false,
+                TokenId(0),
+                fee.into(),
+                ChangePubKeyType::ECDSA,
+                Default::default(),
+            );
 
             let zksync_op = ZkSyncOp::ChangePubKeyOffchain(Box::new(ChangePubKeyOp {
                 tx: tx.clone(),
@@ -128,13 +154,14 @@ impl TestServerConfig {
         {
             let tx = from
                 .sign_transfer(
-                    0,
+                    TokenId(0),
                     "ETH",
                     closest_packable_token_amount(&10_u64.into()),
                     closest_packable_fee_amount(&fee.into()),
                     &to.address,
                     None,
                     false,
+                    Default::default(),
                 )
                 .0;
 
@@ -162,7 +189,16 @@ impl TestServerConfig {
         // Failed transfer tx pair
         {
             let tx = from
-                .sign_transfer(0, "GLM", 1_u64.into(), fee.into(), &to.address, None, false)
+                .sign_transfer(
+                    TokenId(0),
+                    "GLM",
+                    1_u64.into(),
+                    fee.into(),
+                    &to.address,
+                    None,
+                    false,
+                    Default::default(),
+                )
                 .0;
 
             let zksync_op = ZkSyncOp::TransferToNew(Box::new(TransferToNewOp {
@@ -192,10 +228,11 @@ impl TestServerConfig {
                 to.get_account_id().unwrap(),
                 to.address,
                 from.address,
-                0,
+                TokenId(0),
                 2_u64.into(),
                 fee.into(),
-                0,
+                Nonce(0),
+                Default::default(),
                 None,
             );
 
@@ -221,6 +258,41 @@ impl TestServerConfig {
             ));
         }
 
+        // Mint NFT
+        {
+            let tx = from
+                .sign_mint_nft(
+                    TokenId(0),
+                    "ETH",
+                    H256::random(),
+                    closest_packable_fee_amount(&fee.into()),
+                    &to.address,
+                    None,
+                    true,
+                )
+                .0;
+
+            let zksync_op = ZkSyncOp::MintNFTOp(Box::new(MintNFTOp {
+                tx: tx.clone(),
+                creator_account_id: from.get_account_id().unwrap(),
+                recipient_account_id: to.get_account_id().unwrap(),
+            }));
+
+            let executed_tx = ExecutedTx {
+                signed_tx: zksync_op.try_get_tx().unwrap().into(),
+                success: true,
+                op: Some(zksync_op),
+                fail_reason: None,
+                block_index: Some(4),
+                created_at: chrono::Utc::now(),
+                batch_id: None,
+            };
+
+            txs.push((
+                ZkSyncTx::MintNFT(Box::new(tx)),
+                ExecutedOperations::Tx(Box::new(executed_tx)),
+            ));
+        }
         TestTransactions { acc: from, txs }
     }
 
@@ -237,7 +309,13 @@ impl TestServerConfig {
         let mut storage = self.pool.access_storage().await?;
 
         // Check if database is been already inited.
-        if storage.chain().block_schema().get_block(1).await?.is_some() {
+        if storage
+            .chain()
+            .block_schema()
+            .get_block(BlockNumber(1))
+            .await?
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -253,8 +331,8 @@ impl TestServerConfig {
         // Insert PHNX token
         storage
             .tokens_schema()
-            .store_token(Token::new(
-                1,
+            .store_or_update_token(Token::new(
+                TokenId(1),
                 Address::from_str("38A2fDc11f526Ddd5a607C1F251C065f40fBF2f7").unwrap(),
                 "PHNX",
                 18,
@@ -263,8 +341,8 @@ impl TestServerConfig {
         // Insert Golem token with old symbol (from rinkeby).
         storage
             .tokens_schema()
-            .store_token(Token::new(
-                16,
+            .store_or_update_token(Token::new(
+                TokenId(16),
                 Address::from_str("d94e3dc39d4cad1dad634e7eb585a57a19dc7efe").unwrap(),
                 "GNT",
                 18,
@@ -275,13 +353,25 @@ impl TestServerConfig {
 
         // Create and apply several blocks to work with.
         for block_number in 1..=COMMITTED_BLOCKS_COUNT {
-            let updates = (0..3)
+            let block_number = BlockNumber(block_number);
+            let mut updates = (0..3)
                 .flat_map(|_| gen_acc_random_updates(&mut rng))
                 .collect::<Vec<_>>();
+
+            accounts
+                .iter()
+                .enumerate()
+                .for_each(|(id, (account_id, account))| {
+                    updates.append(&mut generate_nft(
+                        *account_id,
+                        account,
+                        block_number.0 * accounts.len() as u32 + id as u32,
+                    ));
+                });
             apply_updates(&mut accounts, updates.clone());
 
             // Add transactions to every odd block.
-            let txs = if block_number % 2 == 1 {
+            let txs = if *block_number % 2 == 1 {
                 let (&id, account) = accounts.iter().next().unwrap();
 
                 Self::gen_zk_txs_for_account(id, account.address, 1_000)
@@ -293,22 +383,13 @@ impl TestServerConfig {
                 vec![]
             };
 
-            // Storage transactions in the block schema.
             storage
                 .chain()
                 .block_schema()
-                .save_block_transactions(block_number, txs.clone())
-                .await?;
-
-            // Store the commit operation in the block schema.
-            let operation = storage
-                .chain()
-                .block_schema()
-                .execute_operation(gen_unique_operation_with_txs(
+                .save_block(gen_sample_block(
                     block_number,
-                    Action::Commit,
                     BLOCK_SIZE_CHUNKS,
-                    txs,
+                    txs.clone(),
                 ))
                 .await?;
             storage
@@ -318,14 +399,31 @@ impl TestServerConfig {
                 .await?;
 
             // Store & confirm the operation in the ethereum schema, as it's used for obtaining
-            // commit/verify hashes.
-            let ethereum_op_id = operation.id.unwrap() as i64;
-            let eth_tx_hash = dummy_ethereum_tx_hash(ethereum_op_id);
+            // commit/verify/execute hashes.
+            let aggregated_operation = gen_unique_aggregated_operation_with_txs(
+                block_number,
+                AggregatedActionType::CommitBlocks,
+                BLOCK_SIZE_CHUNKS,
+                txs.clone(),
+            );
+            OperationsSchema(&mut storage)
+                .store_aggregated_action(aggregated_operation)
+                .await?;
+            let (id, op) = OperationsSchema(&mut storage)
+                .get_aggregated_op_that_affects_block(
+                    AggregatedActionType::CommitBlocks,
+                    block_number,
+                )
+                .await?
+                .unwrap();
+
+            // Store the Ethereum transaction.
+            let eth_tx_hash = dummy_ethereum_tx_hash(id);
             let response = storage
                 .ethereum_schema()
                 .save_new_eth_tx(
-                    OperationType::Commit,
-                    Some(ethereum_op_id),
+                    AggregatedActionType::CommitBlocks,
+                    Some((id, op)),
                     100,
                     100u32.into(),
                     Default::default(),
@@ -341,30 +439,118 @@ impl TestServerConfig {
                 .await?;
 
             // Add verification for the block if required.
-            if block_number <= VERIFIED_BLOCKS_COUNT {
-                storage
-                    .prover_schema()
-                    .store_proof(block_number, &Default::default())
-                    .await?;
-                let operation = storage
-                    .chain()
-                    .block_schema()
-                    .execute_operation(gen_unique_operation(
+            if *block_number <= VERIFIED_BLOCKS_COUNT {
+                // Add jobs to `job_prover_queue`.
+                let job_data = serde_json::Value::default();
+                ProverSchema(&mut storage)
+                    .add_prover_job_to_job_queue(
                         block_number,
-                        Action::Verify {
-                            proof: Default::default(),
-                        },
-                        BLOCK_SIZE_CHUNKS,
-                    ))
+                        block_number,
+                        job_data.clone(),
+                        0,
+                        ProverJobType::SingleProof,
+                    )
+                    .await?;
+                ProverSchema(&mut storage)
+                    .add_prover_job_to_job_queue(
+                        block_number,
+                        block_number,
+                        job_data,
+                        1,
+                        ProverJobType::AggregatedProof,
+                    )
                     .await?;
 
-                let ethereum_op_id = operation.id.unwrap() as i64;
-                let eth_tx_hash = dummy_ethereum_tx_hash(ethereum_op_id);
+                // Get job id.
+                let stored_job_id = ProverSchema(&mut storage)
+                    .get_idle_prover_job_from_job_queue()
+                    .await?
+                    .unwrap()
+                    .job_id;
+                let stored_aggregated_job_id = ProverSchema(&mut storage)
+                    .get_idle_prover_job_from_job_queue()
+                    .await?
+                    .unwrap()
+                    .job_id;
+
+                // Store proofs.
+                let proof = get_sample_single_proof();
+                let aggregated_proof = get_sample_aggregated_proof();
+                ProverSchema(&mut storage)
+                    .store_proof(stored_job_id, block_number, &proof)
+                    .await?;
+                ProverSchema(&mut storage)
+                    .store_aggregated_proof(
+                        stored_aggregated_job_id,
+                        block_number,
+                        block_number,
+                        &aggregated_proof,
+                    )
+                    .await?;
+
+                let aggregated_operation = gen_unique_aggregated_operation_with_txs(
+                    block_number,
+                    AggregatedActionType::PublishProofBlocksOnchain,
+                    BLOCK_SIZE_CHUNKS,
+                    txs.clone(),
+                );
+                OperationsSchema(&mut storage)
+                    .store_aggregated_action(aggregated_operation)
+                    .await?;
+                let (id, op) = OperationsSchema(&mut storage)
+                    .get_aggregated_op_that_affects_block(
+                        AggregatedActionType::PublishProofBlocksOnchain,
+                        block_number,
+                    )
+                    .await?
+                    .unwrap();
+
                 let response = storage
                     .ethereum_schema()
                     .save_new_eth_tx(
-                        OperationType::Verify,
-                        Some(ethereum_op_id),
+                        AggregatedActionType::PublishProofBlocksOnchain,
+                        Some((id, op)),
+                        100,
+                        100u32.into(),
+                        Default::default(),
+                    )
+                    .await?;
+                let eth_tx_hash = dummy_ethereum_tx_hash(id);
+                storage
+                    .ethereum_schema()
+                    .add_hash_entry(response.id, &eth_tx_hash)
+                    .await?;
+                storage
+                    .ethereum_schema()
+                    .confirm_eth_tx(&eth_tx_hash)
+                    .await?;
+            }
+
+            if *block_number <= EXECUTED_BLOCKS_COUNT {
+                let aggregated_operation = gen_unique_aggregated_operation_with_txs(
+                    block_number,
+                    AggregatedActionType::ExecuteBlocks,
+                    BLOCK_SIZE_CHUNKS,
+                    txs.clone(),
+                );
+                OperationsSchema(&mut storage)
+                    .store_aggregated_action(aggregated_operation)
+                    .await?;
+                let (id, op) = OperationsSchema(&mut storage)
+                    .get_aggregated_op_that_affects_block(
+                        AggregatedActionType::ExecuteBlocks,
+                        block_number,
+                    )
+                    .await?
+                    .unwrap();
+
+                // Store the Ethereum transaction.
+                let eth_tx_hash = dummy_ethereum_tx_hash(id);
+                let response = storage
+                    .ethereum_schema()
+                    .save_new_eth_tx(
+                        AggregatedActionType::ExecuteBlocks,
+                        Some((id, op)),
                         100,
                         100u32.into(),
                         Default::default(),
@@ -388,7 +574,7 @@ impl TestServerConfig {
                 block_number: 2,
                 block_index: 2,
                 operation: serde_json::to_value(
-                    dummy_deposit_op(Address::default(), 1, VERIFIED_OP_SERIAL_ID, 2).op,
+                    dummy_deposit_op(Address::default(), AccountId(1), VERIFIED_OP_SERIAL_ID, 2).op,
                 )
                 .unwrap(),
                 from_account: Default::default(),
@@ -403,10 +589,11 @@ impl TestServerConfig {
             },
             // Committed priority operation.
             NewExecutedPriorityOperation {
-                block_number: VERIFIED_BLOCKS_COUNT as i64 + 1,
+                block_number: EXECUTED_BLOCKS_COUNT as i64 + 1,
                 block_index: 1,
                 operation: serde_json::to_value(
-                    dummy_full_exit_op(1, Address::default(), COMMITTED_OP_SERIAL_ID, 3).op,
+                    dummy_full_exit_op(AccountId(1), Address::default(), COMMITTED_OP_SERIAL_ID, 3)
+                        .op,
                 )
                 .unwrap(),
                 from_account: Default::default(),
@@ -462,7 +649,7 @@ pub fn dummy_deposit_op(
     let deposit_op = ZkSyncOp::Deposit(Box::new(DepositOp {
         priority_op: Deposit {
             from: address,
-            token: 0,
+            token: TokenId(0),
             amount: 1_u64.into(),
             to: address,
         },
@@ -494,9 +681,13 @@ pub fn dummy_full_exit_op(
         priority_op: FullExit {
             account_id,
             eth_address,
-            token: 0,
+            token: TokenId(0),
         },
         withdraw_amount: None,
+        creator_account_id: None,
+        creator_address: None,
+        serial_id: None,
+        content_hash: None,
     }));
 
     ExecutedPriorityOp {

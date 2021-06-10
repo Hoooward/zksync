@@ -1,76 +1,34 @@
-use crate::eth_watch::EthWatchRequest;
-use zksync_storage::StorageProcessor;
-use zksync_types::{tokens::get_genesis_token_list, tx::TxHash, Token, TokenId};
-
+use crate::register_factory_handler::run_register_factory_handler;
+use crate::state_keeper::ZkSyncStateInitParams;
 use crate::{
     block_proposer::run_block_proposer_task,
     committer::run_committer,
     eth_watch::start_eth_watch,
     mempool::run_mempool_tasks,
     private_api::start_private_core_api,
-    state_keeper::{start_state_keeper, ZkSyncStateInitParams, ZkSyncStateKeeper},
+    rejected_tx_cleaner::run_rejected_tx_cleaner,
+    state_keeper::{start_state_keeper, ZkSyncStateKeeper},
+    token_handler::run_token_handler,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    future, SinkExt,
-};
+use futures::{channel::mpsc, future};
 use tokio::task::JoinHandle;
 use zksync_config::ZkSyncConfig;
+use zksync_eth_client::EthereumGateway;
+use zksync_gateway_watcher::run_gateway_watcher_if_multiplexed;
 use zksync_storage::ConnectionPool;
+use zksync_types::{tokens::get_genesis_token_list, Token, TokenId};
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 32_768;
 
-pub mod balancer;
 pub mod block_proposer;
 pub mod committer;
 pub mod eth_watch;
 pub mod mempool;
 pub mod private_api;
+pub mod register_factory_handler;
+pub mod rejected_tx_cleaner;
 pub mod state_keeper;
-
-pub async fn insert_pending_withdrawals(
-    storage: &mut StorageProcessor<'_>,
-    eth_watch_req_sender: mpsc::Sender<EthWatchRequest>,
-) {
-    // Check if the pending withdrawals table is empty
-    let no_stored_pending_withdrawals = storage
-        .chain()
-        .operations_schema()
-        .no_stored_pending_withdrawals()
-        .await
-        .expect("failed to call no_stored_pending_withdrawals function");
-    if no_stored_pending_withdrawals {
-        let eth_watcher_channel = oneshot::channel();
-
-        eth_watch_req_sender
-            .clone()
-            .send(EthWatchRequest::GetPendingWithdrawalsQueueIndex {
-                resp: eth_watcher_channel.0,
-            })
-            .await
-            .expect("EthWatchRequest::GetPendingWithdrawalsQueueIndex request sending failed");
-
-        let pending_withdrawals_queue_index = eth_watcher_channel
-            .1
-            .await
-            .expect("EthWatchRequest::GetPendingWithdrawalsQueueIndex response error")
-            .expect("Err as result of EthWatchRequest::GetPendingWithdrawalsQueueIndex");
-
-        // Let's add to the db one 'fake' pending withdrawal with
-        // id equals to (pending_withdrawals_queue_index-1)
-        // Next withdrawals will be added to the db with correct
-        // corresponding indexes in contract's pending withdrawals queue
-        storage
-            .chain()
-            .operations_schema()
-            .add_pending_withdrawal(
-                &TxHash::default(),
-                Some(pending_withdrawals_queue_index as i64 - 1),
-            )
-            .await
-            .expect("can't save fake pending withdrawal in the db");
-    }
-}
+pub mod token_handler;
 
 /// Waits for *any* of the tokio tasks to be finished.
 /// Since the main tokio tasks are used as actors which should live as long
@@ -82,7 +40,7 @@ pub async fn wait_for_tasks(task_futures: Vec<JoinHandle<()>>) {
             panic!("One of the actors finished its run, while it wasn't expected to do it");
         }
         (Err(error), _, _) => {
-            log::warn!("One of the tokio actors unexpectedly finished, shutting down");
+            vlog::warn!("One of the tokio actors unexpectedly finished, shutting down");
             if error.is_panic() {
                 // Resume the panic on the main task
                 std::panic::resume_unwind(error.into_panic());
@@ -95,17 +53,17 @@ pub async fn wait_for_tasks(task_futures: Vec<JoinHandle<()>>) {
 pub async fn genesis_init(config: &ZkSyncConfig) {
     let pool = ConnectionPool::new(Some(1));
 
-    log::info!("Generating genesis block.");
+    vlog::info!("Generating genesis block.");
     ZkSyncStateKeeper::create_genesis_block(
         pool.clone(),
         &config.chain.state_keeper.fee_account_addr,
     )
     .await;
-    log::info!("Adding initial tokens to db");
+    vlog::info!("Adding initial tokens to db");
     let genesis_tokens = get_genesis_token_list(&config.chain.eth.network.to_string())
         .expect("Initial token list not found");
     for (id, token) in (1..).zip(genesis_tokens) {
-        log::info!(
+        vlog::info!(
             "Adding token: {}, id:{}, address: {}, decimals: {}",
             token.symbol,
             id,
@@ -117,12 +75,11 @@ pub async fn genesis_init(config: &ZkSyncConfig) {
             .expect("failed to access db")
             .tokens_schema()
             .store_token(Token {
-                id: id as TokenId,
+                id: TokenId(id as u32),
                 symbol: token.symbol,
-                address: token.address[2..]
-                    .parse()
-                    .expect("failed to parse token address"),
+                address: token.address,
                 decimals: token.decimals,
+                is_nft: false,
             })
             .await
             .expect("failed to store token");
@@ -140,6 +97,7 @@ pub async fn genesis_init(config: &ZkSyncConfig) {
 pub async fn run_core(
     connection_pool: ConnectionPool,
     panic_notify: mpsc::Sender<bool>,
+    eth_gateway: EthereumGateway,
     config: &ZkSyncConfig,
 ) -> anyhow::Result<Vec<JoinHandle<()>>> {
     let (proposed_blocks_sender, proposed_blocks_receiver) =
@@ -154,15 +112,14 @@ pub async fn run_core(
 
     // Start Ethereum Watcher.
     let eth_watch_task = start_eth_watch(
-        &config,
         eth_watch_req_sender.clone(),
         eth_watch_req_receiver,
-        connection_pool.clone(),
+        eth_gateway.clone(),
+        &config,
     );
 
     // Insert pending withdrawals into database (if required)
     let mut storage_processor = connection_pool.access_storage().await?;
-    insert_pending_withdrawals(&mut storage_processor, eth_watch_req_sender.clone()).await;
 
     // Start State Keeper.
     let state_keeper_init = ZkSyncStateInitParams::restore_from_db(&mut storage_processor).await?;
@@ -178,6 +135,7 @@ pub async fn run_core(
         config.chain.state_keeper.block_chunk_sizes.clone(),
         config.chain.state_keeper.miniblock_iterations as usize,
         config.chain.state_keeper.fast_block_miniblock_iterations as usize,
+        config.chain.state_keeper.last_tx_signer_data(),
     );
     let state_keeper_task = start_state_keeper(state_keeper, pending_block);
 
@@ -186,6 +144,7 @@ pub async fn run_core(
         proposed_blocks_receiver,
         mempool_block_request_sender.clone(),
         connection_pool.clone(),
+        &config,
     );
 
     // Start mempool.
@@ -198,6 +157,24 @@ pub async fn run_core(
         4,
         DEFAULT_CHANNEL_CAPACITY,
     );
+
+    let gateway_watcher_task_opt = run_gateway_watcher_if_multiplexed(eth_gateway.clone(), &config);
+
+    // Start token handler.
+    let token_handler_task = run_token_handler(
+        connection_pool.clone(),
+        eth_watch_req_sender.clone(),
+        &config,
+    );
+
+    // Start token handler.
+    let register_factory_task = run_register_factory_handler(
+        connection_pool.clone(),
+        eth_watch_req_sender.clone(),
+        &config,
+    );
+    // Start rejected transactions cleaner task.
+    let rejected_tx_cleaner_task = run_rejected_tx_cleaner(&config, connection_pool.clone());
 
     // Start block proposer.
     let proposer_task = run_block_proposer_task(
@@ -214,13 +191,20 @@ pub async fn run_core(
         config.api.private.clone(),
     );
 
-    let task_futures = vec![
+    let mut task_futures = vec![
         eth_watch_task,
         state_keeper_task,
         committer_task,
         mempool_task,
         proposer_task,
+        rejected_tx_cleaner_task,
+        token_handler_task,
+        register_factory_task,
     ];
+
+    if let Some(task) = gateway_watcher_task_opt {
+        task_futures.push(task);
+    }
 
     Ok(task_futures)
 }

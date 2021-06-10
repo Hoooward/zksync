@@ -4,39 +4,16 @@ use std::collections::HashMap;
 use web3::types::{Address, BlockNumber};
 
 use zksync_types::{
-    ethereum::CompleteWithdrawalsTx, Deposit, FullExit, PriorityOp, ZkSyncPriorityOp,
+    AccountId, Deposit, FullExit, NewTokenEvent, Nonce, PriorityOp, RegisterNFTFactoryEvent,
+    TokenId, ZkSyncPriorityOp,
 };
 
-use crate::eth_watch::{client::EthClient, storage::Storage, EthWatch};
+use crate::eth_watch::{client::EthClient, EthWatch};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-struct FakeStorage {
-    withdrawal_txs: Vec<CompleteWithdrawalsTx>,
-}
-
-impl FakeStorage {
-    fn new() -> Self {
-        Self {
-            withdrawal_txs: vec![],
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Storage for FakeStorage {
-    async fn store_complete_withdrawals(
-        &mut self,
-        complete_withdrawals_txs: Vec<CompleteWithdrawalsTx>,
-    ) -> anyhow::Result<()> {
-        self.withdrawal_txs.extend(complete_withdrawals_txs);
-        Ok(())
-    }
-}
-
 struct FakeEthClientData {
     priority_ops: HashMap<u64, Vec<PriorityOp>>,
-    withdrawals: HashMap<u64, Vec<CompleteWithdrawalsTx>>,
     last_block_number: u64,
 }
 
@@ -44,7 +21,6 @@ impl FakeEthClientData {
     fn new() -> Self {
         Self {
             priority_ops: Default::default(),
-            withdrawals: Default::default(),
             last_block_number: 0,
         }
     }
@@ -104,20 +80,21 @@ impl EthClient for FakeEthClient {
         Ok(operations)
     }
 
-    async fn get_complete_withdrawals_event(
+    async fn get_new_register_nft_factory_events(
         &self,
-        from: BlockNumber,
-        to: BlockNumber,
-    ) -> Result<Vec<CompleteWithdrawalsTx>, anyhow::Error> {
-        let from = self.block_to_number(&from).await;
-        let to = self.block_to_number(&to).await;
-        let mut withdrawals = vec![];
-        for number in from..=to {
-            if let Some(ops) = self.inner.read().await.withdrawals.get(&number) {
-                withdrawals.extend_from_slice(ops);
-            }
-        }
-        Ok(withdrawals)
+        _from: BlockNumber,
+        _to: BlockNumber,
+    ) -> anyhow::Result<Vec<RegisterNFTFactoryEvent>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_new_tokens_events(
+        &self,
+        _from: BlockNumber,
+        _to: BlockNumber,
+    ) -> anyhow::Result<Vec<NewTokenEvent>> {
+        // Ignore NewTokens event.
+        Ok(Vec::new())
     }
 
     async fn block_number(&self) -> Result<u64, anyhow::Error> {
@@ -127,23 +104,22 @@ impl EthClient for FakeEthClient {
     async fn get_auth_fact(
         &self,
         _address: Address,
-        _nonce: u32,
+        _nonce: Nonce,
     ) -> Result<Vec<u8>, anyhow::Error> {
         unreachable!()
     }
 
-    async fn get_first_pending_withdrawal_index(&self) -> Result<u32, anyhow::Error> {
-        unreachable!()
-    }
-
-    async fn get_number_of_pending_withdrawals(&self) -> Result<u32, anyhow::Error> {
+    async fn get_auth_fact_reset_time(
+        &self,
+        _address: Address,
+        _nonce: Nonce,
+    ) -> Result<u64, anyhow::Error> {
         unreachable!()
     }
 }
 
-fn create_watcher<T: EthClient>(client: T) -> EthWatch<T, FakeStorage> {
-    let storage = FakeStorage::new();
-    EthWatch::new(client, storage, 1)
+fn create_watcher<T: EthClient>(client: T) -> EthWatch<T> {
+    EthWatch::new(client, 1)
 }
 
 #[tokio::test]
@@ -154,12 +130,12 @@ async fn test_operation_queues() {
     let to_addr = [2u8; 20].into();
 
     client
-        .add_operations(&vec![
+        .add_operations(&[
             PriorityOp {
                 serial_id: 0,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: from_addr,
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: to_addr,
                 }),
@@ -171,7 +147,7 @@ async fn test_operation_queues() {
                 serial_id: 1,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: Default::default(),
                 }),
@@ -182,9 +158,9 @@ async fn test_operation_queues() {
             PriorityOp {
                 serial_id: 2,
                 data: ZkSyncPriorityOp::FullExit(FullExit {
-                    account_id: 1,
+                    account_id: AccountId(1),
                     eth_address: from_addr,
-                    token: 0,
+                    token: TokenId(0),
                 }),
                 deadline_block: 0,
                 eth_block: 4,
@@ -232,12 +208,12 @@ async fn test_operation_queues_time_lag() {
     // Client's block number will be 110, thus both first and second operations should get to the priority queue
     // in eth watcher.
     client
-        .add_operations(&vec![
+        .add_operations(&[
             PriorityOp {
                 serial_id: 0,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: [2u8; 20].into(),
                 }),
@@ -248,9 +224,9 @@ async fn test_operation_queues_time_lag() {
             PriorityOp {
                 serial_id: 1,
                 data: ZkSyncPriorityOp::FullExit(FullExit {
-                    account_id: 0,
+                    account_id: AccountId(0),
                     eth_address: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                 }),
                 deadline_block: 0,
                 eth_hash: [3; 32].into(),
@@ -260,7 +236,7 @@ async fn test_operation_queues_time_lag() {
                 serial_id: 2,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: Default::default(),
                 }),
@@ -298,12 +274,12 @@ async fn test_operation_queues_time_lag() {
 async fn test_restore_and_poll() {
     let mut client = FakeEthClient::new();
     client
-        .add_operations(&vec![
+        .add_operations(&[
             PriorityOp {
                 serial_id: 0,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: [2u8; 20].into(),
                 }),
@@ -315,7 +291,7 @@ async fn test_restore_and_poll() {
                 serial_id: 1,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: Default::default(),
                 }),
@@ -329,12 +305,12 @@ async fn test_restore_and_poll() {
     let mut watcher = create_watcher(client.clone());
     watcher.restore_state_from_eth(4).await.unwrap();
     client
-        .add_operations(&vec![
+        .add_operations(&[
             PriorityOp {
                 serial_id: 3,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: [2u8; 20].into(),
                 }),
@@ -345,9 +321,9 @@ async fn test_restore_and_poll() {
             PriorityOp {
                 serial_id: 4,
                 data: ZkSyncPriorityOp::FullExit(FullExit {
-                    account_id: 0,
+                    account_id: AccountId(0),
                     eth_address: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                 }),
                 deadline_block: 0,
                 eth_hash: [3; 32].into(),
@@ -373,12 +349,12 @@ async fn test_restore_and_poll() {
 async fn test_restore_and_poll_time_lag() {
     let mut client = FakeEthClient::new();
     client
-        .add_operations(&vec![
+        .add_operations(&[
             PriorityOp {
                 serial_id: 0,
                 data: ZkSyncPriorityOp::Deposit(Deposit {
                     from: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                     amount: Default::default(),
                     to: [2u8; 20].into(),
                 }),
@@ -389,9 +365,9 @@ async fn test_restore_and_poll_time_lag() {
             PriorityOp {
                 serial_id: 1,
                 data: ZkSyncPriorityOp::FullExit(FullExit {
-                    account_id: 0,
+                    account_id: AccountId(0),
                     eth_address: Default::default(),
-                    token: 0,
+                    token: TokenId(0),
                 }),
                 deadline_block: 0,
                 eth_hash: [3; 32].into(),

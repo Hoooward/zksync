@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import * as utils from '../utils';
 import * as env from '../env';
 import fetch from 'node-fetch';
+import { web3Url } from '../utils';
 
 const SQL = () => `psql "${process.env.DATABASE_URL}" -c`;
 
@@ -34,7 +35,7 @@ export async function ethData() {
         params: [process.env.ETH_SENDER_SENDER_OPERATOR_COMMIT_ETH_ADDR as string, 'pending'],
         id: 1
     };
-    const reponse = await fetch(process.env.ETH_CLIENT_WEB3_URL as string, {
+    const reponse = await fetch(web3Url(), {
         method: 'post',
         body: JSON.stringify(body),
         headers: {
@@ -43,9 +44,9 @@ export async function ethData() {
         }
     });
     const nonce = parseInt((await reponse.json()).result);
-    await utils.exec(`${SQL()} "INSERT INTO eth_parameters (nonce, gas_price_limit, commit_ops, verify_ops, withdraw_ops)
+    await utils.exec(`${SQL()} "INSERT INTO eth_parameters (nonce, gas_price_limit, last_committed_block, last_verified_block, last_executed_block)
                      VALUES ('${nonce}', '${process.env.ETH_SENDER_GAS_PRICE_LIMIT_DEFAULT}', 0, 0, 0)
-                     ON CONFLICT (id) DO UPDATE SET (commit_ops, verify_ops, withdraw_ops) = (0, 0, 0)"`);
+                     ON CONFLICT (id) DO UPDATE SET (nonce, last_committed_block, last_verified_block, last_executed_block) = ('${nonce}', 0, 0, 0)"`);
 }
 
 export const command = new Command('insert').description('insert pre-defined data into the database');

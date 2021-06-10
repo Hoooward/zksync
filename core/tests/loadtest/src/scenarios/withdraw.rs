@@ -6,9 +6,10 @@ use num::BigUint;
 use serde::{Deserialize, Serialize};
 // Workspace uses
 use zksync::{types::BlockStatus, utils::closest_packable_token_amount};
+use zksync_types::TokenLike;
 // Local uses
 use super::{Fees, Scenario, ScenarioResources};
-use crate::{monitor::Monitor, test_wallet::TestWallet, utils::wait_all_failsafe};
+use crate::{monitor::Monitor, utils::wait_all_failsafe, wallet::ScenarioWallet};
 
 /// Configuration options for the withdraw scenario.
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -28,12 +29,6 @@ impl Default for WithdrawScenarioConfig {
     }
 }
 
-impl From<WithdrawScenarioConfig> for WithdrawScenario {
-    fn from(config: WithdrawScenarioConfig) -> Self {
-        Self { config }
-    }
-}
-
 /// Withdraw scenario performs several deposit / withdraw operations.
 ///
 /// The purpose of the withdraw scenario is to ensure that deposits
@@ -41,12 +36,13 @@ impl From<WithdrawScenarioConfig> for WithdrawScenario {
 /// load of many transfers.
 #[derive(Debug)]
 pub struct WithdrawScenario {
+    token_name: TokenLike,
     config: WithdrawScenarioConfig,
 }
 
 impl fmt::Display for WithdrawScenario {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("withdraw")
+        write!(f, "withdraw({})", self.token_name)
     }
 }
 
@@ -59,6 +55,8 @@ impl Scenario for WithdrawScenario {
         ScenarioResources {
             wallets_amount: self.config.wallets_amount,
             balance_per_wallet,
+            token_name: self.token_name.clone(),
+            has_deposits: true,
         }
     }
 
@@ -66,19 +64,19 @@ impl Scenario for WithdrawScenario {
         &mut self,
         _monitor: &Monitor,
         _fees: &Fees,
-        _wallets: &[TestWallet],
+        _wallets: &[ScenarioWallet],
     ) -> anyhow::Result<()> {
         Ok(())
     }
 
     async fn run(
         &mut self,
-        monitor: &Monitor,
-        fees: &Fees,
-        wallets: &[TestWallet],
-    ) -> anyhow::Result<()> {
+        monitor: Monitor,
+        fees: Fees,
+        wallets: Vec<ScenarioWallet>,
+    ) -> anyhow::Result<Vec<ScenarioWallet>> {
         for i in 0..self.config.withdraw_rounds {
-            log::info!(
+            vlog::info!(
                 "Withdraw and deposit cycle [{}/{}] started",
                 i + 1,
                 self.config.withdraw_rounds
@@ -86,37 +84,41 @@ impl Scenario for WithdrawScenario {
 
             let futures = wallets
                 .iter()
-                .map(|wallet| Self::withdraw_and_deposit(monitor, fees, wallet))
+                .map(|wallet| Self::withdraw_and_deposit(&monitor, &fees, wallet))
                 .collect::<Vec<_>>();
             wait_all_failsafe(&format!("withdraw/run/cycle/{}", i), futures).await?;
 
-            log::info!(
+            vlog::info!(
                 "Withdraw and deposit cycle [{}/{}] finished",
                 i + 1,
                 self.config.withdraw_rounds
             );
         }
 
-        log::info!("Withdraw scenario has been finished");
+        vlog::info!("Withdraw scenario has been finished");
 
-        Ok(())
+        Ok(wallets)
     }
 
     async fn finalize(
         &mut self,
         _monitor: &Monitor,
         _fees: &Fees,
-        _wallets: &[TestWallet],
+        _wallets: &[ScenarioWallet],
     ) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
 impl WithdrawScenario {
+    pub fn new(token_name: TokenLike, config: WithdrawScenarioConfig) -> Self {
+        Self { token_name, config }
+    }
+
     async fn withdraw_and_deposit(
         monitor: &Monitor,
         fees: &Fees,
-        wallet: &TestWallet,
+        wallet: &ScenarioWallet,
     ) -> anyhow::Result<()> {
         let amount = closest_packable_token_amount(
             &(wallet.balance(BlockStatus::Committed).await? - &fees.zksync),
@@ -131,13 +133,13 @@ impl WithdrawScenario {
 
         await_condition!(
             std::time::Duration::from_millis(1_00),
-            wallet.eth_balance().await? >= amount
+            wallet.l1_balance().await? >= amount
         );
 
-        let eth_balance = wallet.eth_balance().await?;
-        anyhow::ensure!(eth_balance > fees.eth, "Ethereum fee is too low");
+        let balance = wallet.l1_balance().await?;
+        anyhow::ensure!(balance > fees.eth, "Ethereum fee is too low");
 
-        let amount = closest_packable_token_amount(&(eth_balance - &fees.eth));
+        let amount = closest_packable_token_amount(&(balance - &fees.eth));
         monitor
             .wait_for_priority_op(BlockStatus::Verified, &wallet.deposit(amount).await?)
             .await?;

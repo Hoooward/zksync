@@ -1,4 +1,4 @@
-use zksync_basic_types::H256;
+use zksync_basic_types::{AccountId, BlockNumber, H256};
 use zksync_crypto::ff::Field;
 use zksync_crypto::Fr;
 
@@ -10,14 +10,16 @@ use crate::block::Block;
 #[should_panic]
 fn no_supported_block_size() {
     Block::new_from_available_block_sizes(
-        0,
+        BlockNumber(0),
         Default::default(),
-        0,
+        AccountId(0),
         vec![create_withdraw_tx()],
         (0, 0),
         &[0],
         1_000_000.into(),
         1_500_000.into(),
+        H256::default(),
+        0,
     );
 }
 
@@ -25,14 +27,16 @@ fn no_supported_block_size() {
 #[test]
 fn test_get_eth_encoded_root() {
     let block = Block::new(
-        0,
+        BlockNumber(0),
         Fr::one(),
-        0,
+        AccountId(0),
         vec![],
         (0, 0),
         1,
         1_000_000.into(),
         1_500_000.into(),
+        H256::default(),
+        0,
     );
 
     let mut bytes = [0u8; 32];
@@ -45,9 +49,9 @@ fn test_get_eth_encoded_root() {
 #[test]
 fn test_get_eth_public_data() {
     let mut block = Block::new(
-        0,
+        BlockNumber(0),
         Fr::one(),
-        0,
+        AccountId(0),
         vec![
             create_change_pubkey_tx(),
             create_full_exit_op(),
@@ -57,6 +61,8 @@ fn test_get_eth_public_data() {
         100,
         1_000_000.into(),
         1_500_000.into(),
+        H256::default(),
+        0,
     );
 
     let expected = {
@@ -88,14 +94,16 @@ fn test_get_eth_witness_data() {
     ];
     let change_pubkey_tx = &operations[0];
     let mut block = Block::new(
-        0,
+        BlockNumber(0),
         Fr::one(),
-        0,
+        AccountId(0),
         operations.clone(),
         (0, 0),
         100,
         1_000_000.into(),
         1_500_000.into(),
+        H256::default(),
+        0,
     );
 
     let witness = change_pubkey_tx
@@ -129,14 +137,16 @@ fn test_get_withdrawals_data() {
         create_withdraw_tx(),
     ];
     let mut block = Block::new(
-        0,
+        BlockNumber(0),
         Fr::one(),
-        0,
+        AccountId(0),
         operations.clone(),
         (0, 0),
         100,
         1_000_000.into(),
         1_500_000.into(),
+        H256::default(),
+        0,
     );
 
     let expected = {

@@ -23,26 +23,39 @@ use crate::scenarios::ScenarioConfig;
 pub struct AccountInfo {
     pub address: Address,
     pub private_key: H256,
-    /// The name of the token used for testing.
-    pub token_name: TokenLike,
+}
+
+/// Main wallet Ethereum credentials.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub struct WalletCredentials {
+    pub address: Address,
+    pub private_key: H256,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MainWalletConfig {
+    /// Main wallet credentials.
+    #[serde(flatten)]
+    pub credentials: WalletCredentials,
+    /// The token that is used to pay fees for the main wallet operations.
+    pub fee_token: TokenLike,
+    /// Fee for the zkSync transactions in gwei.
+    #[serde(default)]
+    pub zksync_fee: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NetworkConfig {
     /// Network kind used for testing.
     pub name: Network,
-    /// Fee for the Ethereum transactions in gwei.
-    #[serde(default)]
-    pub eth_fee: Option<u64>,
-    /// Fee for the zkSync transactions in gwei.
-    #[serde(default)]
-    pub zksync_fee: Option<u64>,
+    /// Sufficient fee for the Ethereum transactions in gwei.
+    pub eth_fee: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     /// Information about Ethereum account.
-    pub main_wallet: AccountInfo,
+    pub main_wallet: MainWalletConfig,
     /// Network configuration.
     pub network: NetworkConfig,
     /// Loadtest scenarios.

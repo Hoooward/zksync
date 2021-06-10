@@ -1,11 +1,14 @@
 // Built-in deps
 use std::str::FromStr;
 // Workspace deps
-use zksync_crypto::proof::EncodedProofPlonk;
-use zksync_storage::{data_restore::records::NewBlockEvent, StorageProcessor};
+use zksync_storage::{
+    data_restore::records::{NewBlockEvent, NewRollupOpsBlock},
+    StorageProcessor,
+};
 use zksync_types::{
-    Action, Operation, Token, TokenGenesisListItem, TokenId,
-    {block::Block, AccountUpdate, AccountUpdates, ZkSyncOp},
+    aggregated_operations::{BlocksCommitOperation, BlocksExecuteOperation},
+    AccountId, NewTokenEvent, Token, TokenId, TokenInfo,
+    {block::Block, AccountUpdate, AccountUpdates},
 };
 
 // Local deps
@@ -13,22 +16,13 @@ use crate::storage_interactor::StoredTreeState;
 use crate::{
     data_restore_driver::StorageUpdateState,
     events::BlockEvent,
-    events_state::{EventsState, NewTokenEvent},
+    events_state::EventsState,
     rollup_ops::RollupOpsBlock,
     storage_interactor::{
         block_event_into_stored_block_event, stored_block_event_into_block_event,
         stored_ops_block_into_ops_block, StorageInteractor,
     },
 };
-
-impl From<&NewTokenEvent> for zksync_storage::data_restore::records::NewTokenEvent {
-    fn from(event: &NewTokenEvent) -> Self {
-        Self {
-            address: event.address,
-            id: event.id,
-        }
-    }
-}
 
 pub struct DatabaseStorageInteractor<'a> {
     storage: StorageProcessor<'a>,
@@ -61,12 +55,16 @@ impl<'a> DatabaseStorageInteractor<'a> {
 #[async_trait::async_trait]
 impl StorageInteractor for DatabaseStorageInteractor<'_> {
     async fn save_rollup_ops(&mut self, blocks: &[RollupOpsBlock]) {
-        let mut ops: Vec<(u32, &ZkSyncOp, u32)> = vec![];
+        let mut ops = Vec::with_capacity(blocks.len());
 
         for block in blocks {
-            for op in &block.ops {
-                ops.push((block.block_num, op, block.fee_account));
-            }
+            ops.push(NewRollupOpsBlock {
+                block_num: block.block_num,
+                ops: block.ops.as_slice(),
+                fee_account: block.fee_account,
+                timestamp: block.timestamp,
+                previous_block_root_hash: block.previous_block_root_hash,
+            });
         }
 
         self.storage
@@ -83,18 +81,13 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
             .await
             .expect("Failed initializing a DB transaction");
 
-        let commit_op = Operation {
-            action: Action::Commit,
-            block: block.clone(),
-            id: None,
+        let commit_aggregated_operation = BlocksCommitOperation {
+            last_committed_block: block.clone(),
+            blocks: vec![block.clone()],
         };
 
-        let verify_op = Operation {
-            action: Action::Verify {
-                proof: Box::new(EncodedProofPlonk::default()),
-            },
-            block: block.clone(),
-            id: None,
+        let execute_aggregated_operation = BlocksExecuteOperation {
+            blocks: vec![block.clone()],
         };
 
         transaction
@@ -106,9 +99,16 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
 
         transaction
             .data_restore_schema()
-            .save_block_operations(commit_op, verify_op)
+            .save_block_operations(commit_aggregated_operation, execute_aggregated_operation)
             .await
             .expect("Cant execute verify operation");
+
+        transaction
+            .chain()
+            .block_schema()
+            .save_block(block)
+            .await
+            .expect("Unable to save block");
 
         transaction
             .commit()
@@ -116,16 +116,15 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
             .expect("Unable to commit DB transaction");
     }
 
-    async fn store_token(&mut self, token: TokenGenesisListItem, token_id: TokenId) {
+    async fn store_token(&mut self, token: TokenInfo, token_id: TokenId) {
         self.storage
             .tokens_schema()
             .store_token(Token {
                 id: token_id,
                 symbol: token.symbol,
-                address: token.address[2..]
-                    .parse()
-                    .expect("failed to parse token address"),
+                address: token.address,
                 decimals: token.decimals,
+                is_nft: false,
             })
             .await
             .expect("failed to store token");
@@ -144,7 +143,15 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
 
         let block_number = last_watched_eth_block_number.to_string();
 
-        let tokens: Vec<_> = tokens.iter().map(From::from).collect();
+        let tokens: Vec<_> = tokens
+            .iter()
+            .map(
+                |event| zksync_storage::data_restore::records::NewTokenEvent {
+                    address: event.address,
+                    id: event.id,
+                },
+            )
+            .collect();
         self.storage
             .data_restore_schema()
             .save_events_state(new_events.as_slice(), &tokens, &block_number)
@@ -152,7 +159,7 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
             .expect("Cant update events state");
     }
 
-    async fn save_genesis_tree_state(&mut self, genesis_acc_update: AccountUpdate) {
+    async fn save_genesis_tree_state(&mut self, genesis_updates: &[(AccountId, AccountUpdate)]) {
         let (_last_committed, mut _accounts) = self
             .storage
             .chain()
@@ -161,14 +168,22 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
             .await
             .expect("Cant load comitted state");
         assert!(
-            _last_committed == 0 && _accounts.is_empty(),
+            *_last_committed == 0 && _accounts.is_empty(),
             "db should be empty"
         );
         self.storage
             .data_restore_schema()
-            .save_genesis_state(genesis_acc_update)
+            .save_genesis_state(genesis_updates)
             .await
             .expect("Cant update genesis state");
+    }
+
+    async fn save_special_token(&mut self, token: Token) {
+        self.storage
+            .tokens_schema()
+            .store_token(token)
+            .await
+            .expect("failed to store special token");
     }
 
     async fn get_block_events_state_from_storage(&mut self) -> EventsState {
@@ -240,8 +255,8 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
             .load_rollup_ops_blocks()
             .await
             .expect("Cant load operation blocks")
-            .iter()
-            .map(|block| stored_ops_block_into_ops_block(&block))
+            .into_iter()
+            .map(stored_ops_block_into_ops_block)
             .collect()
     }
 
@@ -262,9 +277,14 @@ impl StorageInteractor for DatabaseStorageInteractor<'_> {
             .await
             .expect("Can't get the last verified block");
 
+        // Use new schema to get `last_committed`, `last_verified_block` and `last_executed_block` (ZKS-427).
         self.storage
             .data_restore_schema()
-            .initialize_eth_stats(last_committed_block, last_verified_block)
+            .initialize_eth_stats(
+                last_committed_block,
+                last_verified_block,
+                last_verified_block,
+            )
             .await
             .expect("Can't update the eth_stats table")
     }

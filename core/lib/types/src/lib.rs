@@ -37,15 +37,22 @@
 //! [`Account`]: ./account/struct.Account.html
 
 pub mod account;
+pub mod aggregated_operations;
 pub mod block;
 pub mod config;
+pub mod error;
 pub mod ethereum;
+pub mod event;
+pub mod fee;
+pub mod forced_exit_requests;
 pub mod gas_counter;
 pub mod helpers;
 pub mod mempool;
 pub mod network;
 pub mod operations;
 pub mod priority_ops;
+pub mod prover;
+pub mod register_factory;
 pub mod tokens;
 pub mod tx;
 mod utils;
@@ -55,38 +62,42 @@ mod tests;
 
 pub use self::account::{Account, AccountUpdate, PubKeyHash};
 pub use self::block::{ExecutedOperations, ExecutedPriorityOp, ExecutedTx};
+pub use self::fee::{BatchFee, Fee, OutputFeeType};
 pub use self::operations::{
-    ChangePubKeyOp, DepositOp, ForcedExitOp, FullExitOp, TransferOp, TransferToNewOp, WithdrawOp,
-    ZkSyncOp,
+    ChangePubKeyOp, DepositOp, ForcedExitOp, FullExitOp, MintNFTOp, SwapOp, TransferOp,
+    TransferToNewOp, WithdrawNFTOp, WithdrawOp, ZkSyncOp,
 };
 pub use self::priority_ops::{Deposit, FullExit, PriorityOp, ZkSyncPriorityOp};
-pub use self::tokens::{Token, TokenGenesisListItem, TokenLike, TokenPrice, TxFeeTypes};
-pub use self::tx::{ForcedExit, SignedZkSyncTx, Transfer, Withdraw, ZkSyncTx};
+pub use self::register_factory::RegisterNFTFactoryEvent;
+pub use self::tokens::{NewTokenEvent, Token, TokenInfo, TokenLike, TokenPrice, TxFeeTypes, NFT};
+pub use self::tx::{
+    ForcedExit, MintNFT, Order, SignedZkSyncTx, Swap, Transfer, Withdraw, WithdrawNFT, ZkSyncTx,
+};
 
 #[doc(hidden)]
 pub use self::{operations::CloseOp, tx::Close};
 
 pub use zksync_basic_types::*;
 
-pub type AccountMap = zksync_crypto::fnv::FnvHashMap<u32, Account>;
-pub type AccountUpdates = Vec<(u32, AccountUpdate)>;
+pub type AccountMap = zksync_crypto::fnv::FnvHashMap<AccountId, Account>;
+pub type AccountUpdates = Vec<(AccountId, AccountUpdate)>;
 pub type AccountTree = SparseMerkleTree<Account, Fr, RescueHasher<Engine>>;
 pub type SerialId = u64;
 
 use crate::block::Block;
 pub use zksync_crypto::{
     merkle_tree::{RescueHasher, SparseMerkleTree},
-    proof::EncodedProofPlonk,
     Engine, Fr,
 };
 
 use serde::{Deserialize, Serialize};
+use zksync_crypto::proof::SingleProof;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Action {
     Commit,
-    Verify { proof: Box<EncodedProofPlonk> },
+    Verify { proof: Box<SingleProof> },
 }
 
 impl Action {

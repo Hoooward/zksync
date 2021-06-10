@@ -50,7 +50,7 @@ fn get_unconfirmed_ops_loopback(
         _path: web::Path<String>,
     ) -> Json<serde_json::Value> {
         Json(data.lock().await.clone())
-    };
+    }
 
     let server = actix_web::test::start(move || {
         let ops_handle = ops_handle.clone();
@@ -123,10 +123,14 @@ impl TestServer {
             .get_block_transactions(block)
             .await?;
 
-        let tx = &transactions[0];
+        let tx = &transactions[1];
         let op = tx.op.as_object().unwrap();
 
-        let id = serde_json::from_value(op["accountId"].clone()).unwrap();
+        let id = if op.contains_key("accountId") {
+            serde_json::from_value(op["accountId"].clone()).unwrap()
+        } else {
+            serde_json::from_value(op["creatorId"].clone()).unwrap()
+        };
         Ok(id)
     }
 
@@ -161,7 +165,8 @@ async fn accounts_scope() -> anyhow::Result<()> {
     let (client, server) = TestServer::new().await?;
 
     // Get account information.
-    let account_id = TestServer::account_id(&mut server.pool.access_storage().await?, 1).await?;
+    let account_id =
+        TestServer::account_id(&mut server.pool.access_storage().await?, BlockNumber(1)).await?;
 
     let account_info = client.account_info(account_id).await?.unwrap();
     let address = account_info.address;
@@ -189,12 +194,16 @@ async fn accounts_scope() -> anyhow::Result<()> {
     let account_info = client.account_info(account_id).await?.unwrap();
 
     let depositing_balances = &account_info.depositing.balances["ETH"];
-    assert_eq!(depositing_balances.expected_accept_block, 5);
+    assert_eq!(*depositing_balances.expected_accept_block, 5);
     assert_eq!(depositing_balances.amount.0, 100_500_u64.into());
 
     // Get account transaction receipts.
     let receipts = client
-        .account_tx_receipts(address, AccountReceipts::newer_than(0, None), 10)
+        .account_tx_receipts(
+            address,
+            AccountReceipts::newer_than(BlockNumber(0), None),
+            10,
+        )
         .await?;
 
     assert_eq!(receipts[0].index, None);
@@ -205,7 +214,12 @@ async fn accounts_scope() -> anyhow::Result<()> {
         }
     );
     assert_eq!(receipts[2].index, Some(3));
-    assert_eq!(receipts[2].receipt, Receipt::Verified { block: 1 });
+    assert_eq!(
+        receipts[2].receipt,
+        Receipt::Verified {
+            block: BlockNumber(1)
+        }
+    );
 
     // Get a reversed list of receipts with requests from the end.
     let receipts: Vec<_> = receipts.into_iter().rev().collect();
@@ -217,7 +231,11 @@ async fn accounts_scope() -> anyhow::Result<()> {
     );
     assert_eq!(
         client
-            .account_tx_receipts(address, AccountReceipts::older_than(10, Some(0)), 10)
+            .account_tx_receipts(
+                address,
+                AccountReceipts::older_than(BlockNumber(10), Some(0)),
+                10
+            )
             .await?,
         receipts
     );
@@ -231,14 +249,18 @@ async fn accounts_scope() -> anyhow::Result<()> {
         .chain()
         .block_schema()
         .save_block_transactions(
-            1,
+            BlockNumber(1),
             vec![ExecutedOperations::PriorityOp(Box::new(deposit_op))],
         )
         .await?;
 
     // Get account operation receipts.
     let receipts = client
-        .account_op_receipts(address, AccountReceipts::newer_than(1, Some(0)), 10)
+        .account_op_receipts(
+            address,
+            AccountReceipts::newer_than(BlockNumber(1), Some(0)),
+            10,
+        )
         .await?;
 
     assert_eq!(
@@ -246,30 +268,48 @@ async fn accounts_scope() -> anyhow::Result<()> {
         AccountOpReceipt {
             hash: H256::default(),
             index: 1,
-            receipt: Receipt::Verified { block: 1 }
+            receipt: Receipt::Verified {
+                block: BlockNumber(1)
+            }
         }
     );
     assert_eq!(
         client
-            .account_op_receipts(address, AccountReceipts::newer_than(1, Some(0)), 10)
+            .account_op_receipts(
+                address,
+                AccountReceipts::newer_than(BlockNumber(1), Some(0)),
+                10
+            )
             .await?,
         receipts
     );
     assert_eq!(
         client
-            .account_op_receipts(address, AccountReceipts::older_than(2, Some(0)), 10)
+            .account_op_receipts(
+                address,
+                AccountReceipts::older_than(BlockNumber(2), Some(0)),
+                10
+            )
             .await?,
         receipts
     );
     assert_eq!(
         client
-            .account_op_receipts(account_id, AccountReceipts::newer_than(1, Some(0)), 10)
+            .account_op_receipts(
+                account_id,
+                AccountReceipts::newer_than(BlockNumber(1), Some(0)),
+                10
+            )
             .await?,
         receipts
     );
     assert_eq!(
         client
-            .account_op_receipts(account_id, AccountReceipts::older_than(2, Some(0)), 10)
+            .account_op_receipts(
+                account_id,
+                AccountReceipts::older_than(BlockNumber(2), Some(0)),
+                10
+            )
             .await?,
         receipts
     );
@@ -384,7 +424,9 @@ fn account_tx_response_to_receipt() {
             AccountTxReceipt {
                 index: Some(1),
                 hash: TxHash::default(),
-                receipt: Receipt::Committed { block: 1 },
+                receipt: Receipt::Committed {
+                    block: BlockNumber(1),
+                },
             },
         ),
         (
@@ -400,7 +442,9 @@ fn account_tx_response_to_receipt() {
             AccountTxReceipt {
                 index: Some(1),
                 hash: TxHash::default(),
-                receipt: Receipt::Verified { block: 1 },
+                receipt: Receipt::Verified {
+                    block: BlockNumber(1),
+                },
             },
         ),
     ];
@@ -443,7 +487,9 @@ fn account_op_response_to_receipt() {
             AccountOpReceipt {
                 index: 1,
                 hash: H256::default(),
-                receipt: Receipt::Committed { block: 1 },
+                receipt: Receipt::Committed {
+                    block: BlockNumber(1),
+                },
             },
         ),
         (
@@ -457,7 +503,9 @@ fn account_op_response_to_receipt() {
             AccountOpReceipt {
                 index: 1,
                 hash: H256::default(),
-                receipt: Receipt::Verified { block: 1 },
+                receipt: Receipt::Verified {
+                    block: BlockNumber(1),
+                },
             },
         ),
     ];

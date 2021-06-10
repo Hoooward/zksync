@@ -16,7 +16,7 @@ use tokio::{
 };
 // Workspace uses
 // Local uses
-use crate::{config::AccountInfo, executor::Report};
+use crate::{config::WalletCredentials, executor::Report};
 
 struct Session {
     sender: Sender<Message>,
@@ -33,7 +33,7 @@ fn session() -> &'static Session {
 
 #[derive(Debug)]
 enum Message {
-    WalletCreated(AccountInfo),
+    WalletCreated(WalletCredentials),
     ErrorOccurred { category: String, reason: String },
 }
 
@@ -51,7 +51,7 @@ pub async fn init_session(out_dir: impl AsRef<Path>) -> anyhow::Result<()> {
     let (sender, receiver) = channel(2048);
     let out_dir = out_dir.as_ref().to_owned();
 
-    log::info!(
+    vlog::info!(
         "Load tests log will saved into the file://{} directory.",
         out_dir.to_string_lossy()
     );
@@ -74,8 +74,8 @@ pub async fn finish_session(report: &Report) -> anyhow::Result<()> {
 }
 
 /// Saves specified wallet in the file log.
-pub fn save_wallet(info: AccountInfo) {
-    let msg = Message::WalletCreated(info);
+pub fn save_wallet(credentials: WalletCredentials) {
+    let msg = Message::WalletCreated(credentials);
 
     tokio::spawn(async move {
         session()

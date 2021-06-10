@@ -38,13 +38,14 @@ impl From<TxAddError> for RpcErrorCodes {
             TxAddError::EmptyBatch => Self::Other,
             TxAddError::BatchTooBig => Self::Other,
             TxAddError::BatchWithdrawalsOverload => Self::Other,
+            TxAddError::EthSignaturesLimitExceeded => Self::Other,
         }
     }
 }
 
-impl Into<ErrorCode> for RpcErrorCodes {
-    fn into(self) -> ErrorCode {
-        (self as i64).into()
+impl From<RpcErrorCodes> for ErrorCode {
+    fn from(val: RpcErrorCodes) -> Self {
+        (val as i64).into()
     }
 }
 
